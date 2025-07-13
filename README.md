@@ -103,36 +103,6 @@ Prompt Picker is built with:
 - [React](https://react.dev/) + [TypeScript](https://www.typescriptlang.org/)
 - [Lucide React](https://lucide.dev/) – pixel-perfect icons
 
-### Code Signing (macOS Distribution)
-
-To distribute the app without the "damaged" error, you need to code sign and notarize:
-
-1. **Get a Developer ID Certificate**
-   - Join the [Apple Developer Program](https://developer.apple.com/programs/) ($99/year)
-   - Create a "Developer ID Application" certificate in Xcode or Developer Portal
-
-2. **Set Environment Variables**
-   Copy `env.example` to `.env` and fill in your actual values:
-   ```bash
-   cp env.example .env
-   # Then edit .env with your certificate details
-   ```
-   
-   Or export them in your shell:
-   ```bash
-   export APPLE_CERTIFICATE_IDENTITY="Developer ID Application: Your Name (TEAM_ID)"
-   export APPLE_ID="your-apple-id@example.com"
-   export APPLE_PASSWORD="app-specific-password"
-   export APPLE_TEAM_ID="YOUR_TEAM_ID"
-   ```
-
-4. **Build with Code Signing**
-   ```bash
-   npm run tauri build
-   ```
-
-The resulting app will be properly signed and notarized, eliminating the security warning.
-
 ---
 
 ## 🤝 Contributing
