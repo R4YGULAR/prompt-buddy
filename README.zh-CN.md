@@ -108,36 +108,6 @@ npm run tauri build
 - React + TypeScript - 前端 UI
 - Lucide React - 图标库
 
-### 代码签名（macOS 分发）
-
-要分发不出现"损坏"错误的应用，您需要进行代码签名和公证：
-
-1. **获取开发者 ID 证书**
-   - 加入 [Apple 开发者计划](https://developer.apple.com/programs/)（$99/年）
-   - 在 Xcode 或开发者门户中创建"Developer ID Application"证书
-
-2. **设置环境变量**
-   复制 `env.example` 到 `.env` 并填入您的实际值：
-   ```bash
-   cp env.example .env
-   # 然后编辑 .env 文件，填入您的证书详细信息
-   ```
-   
-   或在终端中导出：
-   ```bash
-   export APPLE_CERTIFICATE_IDENTITY="Developer ID Application: Your Name (TEAM_ID)"
-   export APPLE_ID="your-apple-id@example.com"
-   export APPLE_PASSWORD="app-specific-password"
-   export APPLE_TEAM_ID="YOUR_TEAM_ID"
-   ```
-
-3. **构建并签名**
-   ```bash
-   npm run tauri build
-   ```
-
-生成的应用将被正确签名和公证，消除安全警告。
-
 ## 许可证
 
 本项目采用 **GNU Affero General Public License v3.0 (AGPL-3.0)**。您可以自由使用、修改及分发，但须遵守 AGPL 条款。 
