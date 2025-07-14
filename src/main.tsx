@@ -8,7 +8,7 @@ const params = new URLSearchParams(window.location.search);
 let Component: React.ComponentType = App;
 if (params.has("settings")) {
   Component = SettingsPage;
-} else if (params.has("edit")) {
+} else if (params.has("edit") || params.has("add")) {
   Component = PromptEditor;
 }
 

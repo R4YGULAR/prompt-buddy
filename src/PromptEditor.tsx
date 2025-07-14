@@ -58,7 +58,11 @@ const DEFAULT_PROMPTS: Prompt[] = [
 
 function PromptEditor() {
   const urlParams = new URLSearchParams(window.location.search);
-  const index = parseInt(urlParams.get("edit") || "-1", 10);
+  const editParam = urlParams.get("edit");
+  const isAddMode = urlParams.has("add");
+  const index = isAddMode ? -1 : parseInt(editParam || "-1", 10);
+
+  console.log('PromptEditor initialized:', { editParam, isAddMode, index });
 
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [title, setTitle] = useState("");
@@ -66,31 +70,136 @@ function PromptEditor() {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
+    console.log('PromptEditor useEffect, index:', index);
     const load = async () => {
-      const store = await Store.load("prompts.json");
-      let saved = (await store.get<Prompt[]>("prompts")) || [];
-      if (saved.length === 0) saved = DEFAULT_PROMPTS;
-      if (index >= 0 && index < saved.length) {
-        const p = saved[index];
-        setPrompt(p);
-        setTitle(p.title);
-        setContent(p.content);
+      try {
+        console.log('Starting load');
+        const store = await Store.load('prompts.json');
+        console.log('Store loaded');
+        let saved = await store.get<Prompt[]>('prompts') || [];
+        console.log('Got saved prompts:', saved);
+        if (saved.length === 0) saved = DEFAULT_PROMPTS;
+        if (index >= 0 && index < saved.length) {
+          const p = saved[index];
+          setPrompt(p);
+          setTitle(p.title);
+          setContent(p.content);
+        } else if (index === -1) {
+          const defaultColor = 'from-blue-500 to-cyan-500';
+          const tempPrompt = {id: '', title: '', content: '', color: defaultColor};
+          setPrompt(tempPrompt);
+          setTitle('');
+          setContent('');
+        }
+        setLoaded(true);
+        console.log('Set loaded to true');
+      } catch (error) {
+        console.error('Error in load:', error);
+        setLoaded(true);
+        if (index === -1) {
+          const defaultColor = 'from-blue-500 to-cyan-500';
+          const tempPrompt = {id: '', title: '', content: '', color: defaultColor};
+          setPrompt(tempPrompt);
+          setTitle('');
+          setContent('');
+        } else {
+          setPrompt(null);
+        }
       }
-      setLoaded(true);
     };
     load();
   }, [index]);
 
   const save = async () => {
-    if (!prompt) return;
-    const store = await Store.load("prompts.json");
-    const saved = (await store.get<Prompt[]>("prompts")) || DEFAULT_PROMPTS;
-    if (index >= 0 && index < saved.length) {
-      saved[index] = { ...prompt, title, content };
+    console.log('💾 Save called, prompt:', prompt, 'index:', index);
+    console.log('📝 Title:', title, 'Content:', content);
+    
+    if (!prompt) {
+      console.error('❌ No prompt object, cannot save');
+      return;
+    }
+    
+    if (!title.trim() || !content.trim()) {
+      console.error('❌ Title or content is empty');
+      alert('Please enter both title and content');
+      return;
+    }
+    
+    try {
+      console.log('📁 Loading store...');
+      const store = await Store.load("prompts.json");
+      
+      console.log('📋 Getting current prompts...');
+      let saved = await store.get<Prompt[]>("prompts") || [];
+      console.log('📋 Current saved prompts:', saved);
+      
+      if (saved.length === 0) {
+        saved = DEFAULT_PROMPTS;
+        console.log('📋 Using default prompts as base');
+      }
+      
+      if (index >= 0 && index < saved.length) {
+        console.log('✏️ Editing existing prompt at index:', index);
+        saved[index] = { ...prompt, title: title.trim(), content: content.trim() };
+      } else if (index === -1) {
+        console.log('➕ Adding new prompt');
+        const newId = (saved.length + 1).toString();
+        const newPrompt = { 
+          id: newId, 
+          title: title.trim(), 
+          content: content.trim(), 
+          color: prompt.color 
+        };
+        console.log('🆕 New prompt object:', newPrompt);
+        saved.push(newPrompt);
+      }
+      
+      console.log('💾 Final prompts array to save:', saved);
+      console.log('📏 Array length:', saved.length);
+      
+      // Save to store with explicit operations
       await store.set("prompts", saved);
-      await emit("prompts-updated");
+      console.log('📝 Store.set completed');
+      
+      await store.save();
+      console.log('💾 Store.save completed');
+      
+      // Try multiple event emission approaches
+      try {
+        console.log('📡 Attempting event emission...');
+        
+        // Approach 1: Simple emit
+        await emit("prompts-updated");
+        console.log('✅ Basic prompts-updated event emitted');
+        
+        // Approach 2: Emit with payload
+        await emit("prompts-updated", { 
+          timestamp: Date.now(),
+          action: index === -1 ? 'add' : 'edit',
+          promptCount: saved.length 
+        });
+        console.log('✅ Enhanced prompts-updated event emitted');
+        
+        // Approach 3: Force reload by touching the store again
+        await store.set("_trigger", Date.now());
+        await store.save();
+        console.log('✅ Store trigger updated');
+        
+      } catch (eventError) {
+        console.error('❌ Event emission failed:', eventError);
+      }
+      
+      // Wait longer to ensure event processing
+      console.log('⏳ Waiting for event processing...');
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      console.log('🪟 Closing window...');
       const win = getCurrentWindow();
       await win.close();
+      
+    } catch (error) {
+      console.error('❌ Error saving prompt:', error);
+      alert('Failed to save prompt: ' + (error instanceof Error ? error.message : String(error)));
     }
   };
 
@@ -109,7 +218,7 @@ function PromptEditor() {
 
   return (
     <div className="prompt-editor">
-      <h2>Edit Prompt {index + 1}</h2>
+      <h2>{index >= 0 ? `Edit Prompt ${index + 1}` : "Add New Prompt"}</h2>
       <label>
         Title:
         <input

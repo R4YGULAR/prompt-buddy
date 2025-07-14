@@ -66,22 +66,35 @@ function App() {
   const [injectedId, setInjectedId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
   const pillRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const addPillRef = useRef<HTMLDivElement | null>(null);
 
   /* --------------------------------------------------
    * Load & persist prompts
    * -------------------------------------------------- */
   const loadPrompts = useCallback(async () => {
-    const store = await Store.load("prompts.json");
-    let saved = await store.get<Prompt[]>("prompts");
-    if (!saved || saved.length === 0) {
-      saved = DEFAULT_PROMPTS;
-      await store.set("prompts", saved);
-      await store.save();
+    console.log('🔄 loadPrompts called');
+    try {
+      const store = await Store.load("prompts.json");
+      console.log('📁 Store loaded');
+      let saved = await store.get<Prompt[]>("prompts");
+      console.log('📋 Raw saved prompts:', saved);
+      if (!saved || saved.length === 0) {
+        console.log('📋 No saved prompts, using defaults');
+        saved = DEFAULT_PROMPTS;
+        await store.set("prompts", saved);
+        await store.save();
+        console.log('💾 Default prompts saved to store');
+      }
+      console.log('✅ Setting prompts to:', saved);
+      setPrompts(saved);
+      console.log('🎯 Prompts state updated, length:', saved.length);
+    } catch (error) {
+      console.error('❌ Error in loadPrompts:', error);
     }
-    setPrompts(saved);
   }, []);
 
   useEffect(() => {
+    console.log('🚀 Initial loadPrompts call');
     loadPrompts();
   }, [loadPrompts]);
 
@@ -107,11 +120,51 @@ function App() {
   }, [prompts]);
 
   useEffect(() => {
-    const unlistenPromise = listen("prompts-updated", loadPrompts);
+    console.log('👂 Setting up prompts-updated listeners');
+    
+    // Primary event listener
+    const unlistenPromise1 = listen("prompts-updated", (event) => {
+      console.log('🔔 prompts-updated event received!', event);
+      loadPrompts();
+    });
+    
+    // Secondary listener with different approach
+    const unlistenPromise2 = listen("prompts-updated", () => {
+      console.log('🔔 Secondary prompts-updated listener triggered');
+      setTimeout(() => loadPrompts(), 50);
+    });
+    
+    // Polling mechanism as backup - check for store changes every 2 seconds
+    const pollInterval = setInterval(async () => {
+      try {
+        const store = await Store.load("prompts.json");
+        const saved = await store.get<Prompt[]>("prompts") || [];
+        const trigger = await store.get("_trigger");
+        
+        // If trigger timestamp exists and is recent (last 5 seconds), reload
+        if (trigger && typeof trigger === 'number' && Date.now() - trigger < 5000) {
+          console.log('🔄 Store trigger detected, reloading prompts');
+          await store.set("_trigger", null); // Clear trigger
+          await store.save();
+          loadPrompts();
+        }
+        
+        // Also check if prompt count changed
+        if (saved.length !== prompts.length) {
+          console.log(`📊 Prompt count changed: ${prompts.length} → ${saved.length}`);
+          loadPrompts();
+        }
+      } catch (error) {
+        console.log('📊 Polling check failed:', error);
+      }
+    }, 2000);
+    
     return () => {
-      unlistenPromise.then((unlisten) => unlisten());
+      unlistenPromise1.then((unlisten) => unlisten());
+      unlistenPromise2.then((unlisten) => unlisten());
+      clearInterval(pollInterval);
     };
-  }, [loadPrompts]);
+  }, [loadPrompts, prompts.length]);
 
   /* --------------------------------------------------
    * Keyboard listener – press 1-9 to inject prompts
@@ -222,10 +275,10 @@ function App() {
   /* --------------------------------------------------
    * Open Edit Window
    * -------------------------------------------------- */
-  const openEditWindow = async (index: number, element?: HTMLElement | null) => {
+  const openEditWindow = async (index: number, pill?: HTMLElement) => {
     console.log(`openEditWindow called for index ${index}`);
     try {
-      const label = `edit-${index}`;
+      const label = index === -1 ? 'edit-add' : `edit-${index}`;
       const existing = await WebviewWindow.getByLabel(label);
       if (existing) {
         console.log(`Focusing existing edit window ${label}`);
@@ -239,11 +292,11 @@ function App() {
       let newLeft: number | undefined;
       let newTop: number | undefined;
 
-      if (element) {
+      if (pill) {
         const win = getCurrentWindow();
         const pos = await win.outerPosition();
         const scale = await win.scaleFactor();
-        const rect = element.getBoundingClientRect();
+        const rect = pill.getBoundingClientRect();
         const physicalLeft = pos.x + Math.round(rect.left * scale);
         const physicalTop = pos.y + Math.round(rect.top * scale);
         const physicalWidth = Math.round(rect.width * scale);
@@ -258,9 +311,12 @@ function App() {
         console.warn(`No element provided for positioning edit window index ${index}`);
       }
 
+      const urlParam = index === -1 ? 'add' : `edit=${index}`;
+      const windowTitle = index === -1 ? 'Add New Prompt' : `Edit Prompt ${index + 1}`;
+
       const newWin = new WebviewWindow(label, {
-        url: `index.html?edit=${index}`,
-        title: `Edit Prompt ${index + 1}`,
+        url: `index.html?${urlParam}`,
+        title: windowTitle,
         width: EDIT_WIDTH,
         height: EDIT_HEIGHT,
         resizable: true,
@@ -345,6 +401,23 @@ function App() {
               />
             </div>
           ))}
+          {prompts.length < 9 && (
+            <div
+              ref={addPillRef}
+              className="prompt-pill add-pill"
+              onClick={() => {
+                if (addPillRef.current) {
+                  openEditWindow(-1, addPillRef.current);
+                } else {
+                  openEditWindow(-1, undefined);
+                }
+              }}
+            >
+              <div className="prompt-badge">
+                <div className="prompt-number">+</div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Controls */}
