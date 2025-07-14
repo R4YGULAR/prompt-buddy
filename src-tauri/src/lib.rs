@@ -5,6 +5,7 @@ use once_cell::sync::Lazy;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use enigo::{Enigo, Keyboard, Settings};
 use tauri::{WebviewWindowBuilder, WebviewUrl, LogicalPosition};
+use tauri_plugin_dialog;
 
 // Store the name of the application that was active **before** the prompt bar
 // was shown. This lets us switch focus back to that application after the user
@@ -262,6 +263,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![greet, inject_text, check_accessibility_permissions, toggle_window_visibility, show_popup, hide_popup, capture_frontmost_app, activate_last_app])
         .setup(|app| {
             println!("🔧 Setting up global shortcuts with handlers...");

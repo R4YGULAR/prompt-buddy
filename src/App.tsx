@@ -7,6 +7,8 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Settings, X, Pencil } from "lucide-react";
 import "./App.css";
 import { PhysicalPosition } from "@tauri-apps/api/window";
+import { confirm } from '@tauri-apps/plugin-dialog';
+import { emit } from "@tauri-apps/api/event";
 
 interface Prompt {
   id: string;
@@ -188,6 +190,18 @@ function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [prompts]);
 
+  useEffect(() => {
+    const unlistenPromise = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (!focused) {
+        setExpandedIndex(null);
+      }
+    });
+
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
   /* --------------------------------------------------
    * Hover handlers
    * -------------------------------------------------- */
@@ -335,6 +349,39 @@ function App() {
     }
   };
 
+  const deletePrompt = async (index: number) => {
+    const promptToDelete = prompts[index];
+    if (!promptToDelete) return;
+
+    const confirmed = await confirm(
+      `Are you sure you want to delete the prompt "${promptToDelete.title}"?`,
+      { title: "Confirm Deletion", kind: "warning" }
+    );
+
+    if (!confirmed) return;
+
+    try {
+      const store = await Store.load("prompts.json");
+      let saved = await store.get<Prompt[]>("prompts") || [];
+      
+      // Find the index by id to be safe
+      const storeIndex = saved.findIndex(p => p.id === promptToDelete.id);
+      if (storeIndex !== -1) {
+        saved.splice(storeIndex, 1);
+        await store.set("prompts", saved);
+        await store.save();
+        await emit("prompts-updated");
+        // Assuming 'emit' is a global function or imported elsewhere,
+        // otherwise, you might need to use a different event emitter.
+        // For now, we'll just reload and update the state.
+        loadPrompts();
+      }
+    } catch (error) {
+      console.error('Error deleting prompt:', error);
+      // Optionally show error message
+    }
+  };
+
   /* --------------------------------------------------
    * Render
    * -------------------------------------------------- */
@@ -359,7 +406,8 @@ function App() {
                   console.log(`Right-click (mouse down) detected on prompt ${i + 1}`);
                   e.preventDefault();
                   e.stopPropagation();
-                  openEditWindow(i, e.currentTarget as HTMLElement);
+                  const pill = pillRefs.current[i];
+                  openEditWindow(i, pill ?? undefined);
                 }
               }}
               data-tauri-drag-region="false"
@@ -373,13 +421,25 @@ function App() {
                     e.stopPropagation();
                     console.log(`Edit button clicked for prompt ${i + 1}`);
                     const pill = pillRefs.current[i];
-                    openEditWindow(i, pill);
+                    openEditWindow(i, pill ?? undefined);
                   }}
                   data-tauri-drag-region="false"
                 >
                   <Pencil size={12} />
                 </button>
               </div>
+
+              {/* Delete button in top right corner */}
+              <button
+                className="delete-btn delete-btn-corner"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  deletePrompt(i);
+                }}
+                data-tauri-drag-region="false"
+              >
+                <X size={12} />
+              </button>
 
               {expandedIndex === i ? (
                 <div className="prompt-full-container">
