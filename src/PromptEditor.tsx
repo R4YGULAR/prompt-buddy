@@ -143,7 +143,8 @@ function PromptEditor() {
         saved[index] = { ...prompt, title: title.trim(), content: content.trim() };
       } else if (index === -1) {
         console.log('➕ Adding new prompt');
-        const newId = (saved.length + 1).toString();
+        // Generate a proper unique ID using timestamp + random
+        const newId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         const newPrompt = { 
           id: newId, 
           title: title.trim(), 
@@ -152,6 +153,24 @@ function PromptEditor() {
         };
         console.log('🆕 New prompt object:', newPrompt);
         saved.push(newPrompt);
+        
+        // Sort prompts to ensure consistent ordering (by creation time based on ID)
+        saved.sort((a, b) => {
+          // For default prompts with numeric IDs, maintain original order
+          const aIsNumeric = /^\d+$/.test(a.id);
+          const bIsNumeric = /^\d+$/.test(b.id);
+          
+          if (aIsNumeric && bIsNumeric) {
+            return parseInt(a.id) - parseInt(b.id);
+          } else if (aIsNumeric && !bIsNumeric) {
+            return -1; // Default prompts first
+          } else if (!aIsNumeric && bIsNumeric) {
+            return 1; // Custom prompts after defaults
+          } else {
+            // Both are custom, sort by ID (which includes timestamp)
+            return a.id.localeCompare(b.id);
+          }
+        });
       }
       
       console.log('💾 Final prompts array to save:', saved);

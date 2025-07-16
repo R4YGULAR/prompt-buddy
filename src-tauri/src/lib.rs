@@ -1,5 +1,4 @@
 use tauri::{AppHandle, Listener, Manager, Emitter};
-use std::process::Command;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -7,10 +6,28 @@ use enigo::{Enigo, Keyboard, Settings};
 use tauri::{WebviewWindowBuilder, WebviewUrl, LogicalPosition};
 use tauri_plugin_dialog;
 
+#[cfg(target_os = "macos")]
+use std::process::Command;
+
+#[cfg(windows)]
+use windows::{
+    Win32::Foundation::HWND,
+    Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, SetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible, ShowWindow, SW_RESTORE,
+    },
+    Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION},
+    Win32::System::ProcessStatus::GetProcessImageFileNameW,
+};
+
 // Store the name of the application that was active **before** the prompt bar
 // was shown. This lets us switch focus back to that application after the user
 // clicks a prompt pill so the text is inserted into the correct window.
 static LAST_APP_NAME: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+// Store the HWND on Windows for precise window management (as integer for thread safety)
+#[cfg(windows)]
+static LAST_WINDOW_HWND: Lazy<Mutex<Option<isize>>> = Lazy::new(|| Mutex::new(None));
 
 #[cfg(target_os = "macos")]
 fn get_frontmost_app() -> Option<String> {
@@ -38,11 +55,81 @@ fn activate_app(app_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-// Stub helpers for non-macOS platforms so compilation still succeeds.
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn get_frontmost_app() -> Option<String> {
+    unsafe {
+        let foreground_window = GetForegroundWindow();
+        if foreground_window.0.is_null() {
+            return None;
+        }
+
+        // Store the HWND for later reactivation (convert to integer for thread safety)
+        *LAST_WINDOW_HWND.lock().unwrap() = Some(foreground_window.0 as isize);
+
+        // Get the process ID
+        let mut process_id = 0u32;
+        GetWindowThreadProcessId(foreground_window, Some(&mut process_id));
+        
+        // Open the process to get its name
+        let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, false, process_id).ok()?;
+        
+        // Get the process executable name
+        let mut buffer = [0u16; 1024];
+        
+        if GetProcessImageFileNameW(process_handle, &mut buffer) > 0 {
+            let process_path = String::from_utf16_lossy(&buffer);
+            // Extract just the filename from the full path
+            if let Some(filename) = process_path.split('\\').last() {
+                let name = filename.trim_end_matches('\0').to_string();
+                if !name.is_empty() {
+                    println!("🪟 Windows: Captured foreground app: {}", name);
+                    return Some(name);
+                }
+            }
+        }
+        
+        // Fallback: try to get window title
+        let mut title_buffer = [0u16; 256];
+        let title_len = GetWindowTextW(foreground_window, &mut title_buffer);
+        if title_len > 0 {
+            let title = String::from_utf16_lossy(&title_buffer[..title_len as usize]);
+            println!("🪟 Windows: Got window title: {}", title);
+            return Some(title);
+        }
+        
+        None
+    }
+}
+
+#[cfg(windows)]
+fn activate_app(_app_name: &str) -> bool {
+    unsafe {
+        if let Some(hwnd_val) = *LAST_WINDOW_HWND.lock().unwrap() {
+            let window = HWND(hwnd_val as *mut _);
+            println!("🪟 Windows: Attempting to reactivate window with HWND: {:?}", window.0);
+            
+            // First check if the window is still valid and visible
+            if IsWindowVisible(window).as_bool() {
+                // Restore the window if it's minimized
+                let _ = ShowWindow(window, SW_RESTORE);
+                
+                // Set it as the foreground window
+                let result = SetForegroundWindow(window).as_bool();
+                println!("🪟 Windows: SetForegroundWindow result: {}", result);
+                return result;
+            } else {
+                println!("🪟 Windows: Stored window is no longer visible");
+            }
+        }
+        false
+    }
+}
+
+// Stub helpers for other platforms
+#[cfg(not(any(target_os = "macos", windows)))]
 fn get_frontmost_app() -> Option<String> { None }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 fn activate_app(_app_name: &str) -> bool { false }
 
 #[derive(Clone, serde::Serialize)]
@@ -232,7 +319,7 @@ async fn capture_frontmost_app() -> Result<(), String> {
 
 // Command that re-activates the application we previously captured with
 // `remember_current_app()`.  The frontend can call this right after a pill
-// click so macOS focus is switched back before we start typing.
+// click so focus is switched back before we start typing.
 #[tauri::command]
 async fn activate_last_app() -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -249,11 +336,108 @@ async fn activate_last_app() -> Result<(), String> {
         Ok(())
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     {
-        println!("🔄 activate_last_app called on non-macOS platform – noop");
+        if let Some(app_name) = LAST_APP_NAME.lock().unwrap().clone() {
+            println!("🔄 Windows: Tauri cmd: activating last app = {}", app_name);
+            if activate_app(&app_name) {
+                return Ok(());
+            } else {
+                return Err(format!("Failed to activate {}", app_name));
+            }
+        }
+        println!("ℹ️  Windows: No last app recorded - nothing to activate");
         Ok(())
     }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        println!("🔄 activate_last_app called on unsupported platform – noop");
+        Ok(())
+    }
+}
+
+#[tauri::command]
+async fn preserve_window_state(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        println!("🔒 Preserving window state before focus switch");
+        
+        // Store current position and size before switching focus
+        if let Ok(position) = window.outer_position() {
+            println!("📍 Current position: {:?}", position);
+        }
+        if let Ok(size) = window.outer_size() {
+            println!("📏 Current size: {:?}", size);
+        }
+        
+        // Ensure the window is in a known good state before focus switch
+        let _ = window.set_resizable(false);
+        let _ = window.set_minimizable(false);
+        let _ = window.set_maximizable(false);
+        let _ = window.unmaximize(); // Ensure it's not maximized before we switch
+        
+        println!("🔒 Window prepared for focus switch");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn restore_window_state(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        println!("🔓 Restoring window state after text injection");
+        
+        // Force window to proper state immediately - never maximized
+        let _ = window.unmaximize();
+        let _ = window.unminimize();
+        
+        // Ensure window is still properly configured
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_skip_taskbar(true);
+        let _ = window.set_resizable(false);
+        let _ = window.set_minimizable(false);
+        let _ = window.set_maximizable(false);
+        
+        // Force the exact size from config
+        let _ = window.set_size(tauri::PhysicalSize::new(800, 80));
+        
+        // Re-apply window constraints 
+        let _ = window.set_min_size(Some(tauri::PhysicalSize::new(800, 80)));
+        let _ = window.set_max_size(Some(tauri::PhysicalSize::new(800, 80)));
+        
+        // Ensure visibility and focus
+        if let Ok(is_visible) = window.is_visible() {
+            if is_visible {
+                let _ = window.set_focus();
+            }
+        }
+        
+        println!("✅ Window state restoration complete");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn lock_window_state(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        println!("🔐 Aggressively locking window state");
+        
+        // Force unmaximize multiple times
+        let _ = window.unmaximize();
+        let _ = window.unminimize();
+        
+        // Lock all the settings
+        let _ = window.set_resizable(false);
+        let _ = window.set_minimizable(false);
+        let _ = window.set_maximizable(false);
+        
+        // Force exact size
+        let _ = window.set_size(tauri::PhysicalSize::new(800, 80));
+        let _ = window.set_min_size(Some(tauri::PhysicalSize::new(800, 80)));
+        let _ = window.set_max_size(Some(tauri::PhysicalSize::new(800, 80)));
+        
+        println!("🔐 Window state locked");
+    }
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -264,7 +448,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![greet, inject_text, check_accessibility_permissions, toggle_window_visibility, show_popup, hide_popup, capture_frontmost_app, activate_last_app])
+        .invoke_handler(tauri::generate_handler![greet, inject_text, check_accessibility_permissions, toggle_window_visibility, show_popup, hide_popup, capture_frontmost_app, activate_last_app, preserve_window_state, restore_window_state, lock_window_state])
         .setup(|app| {
             println!("🔧 Setting up global shortcuts with handlers...");
             
@@ -384,6 +568,17 @@ pub fn run() {
                 // focus to it when the user clicks a prompt.
                 remember_current_app();
 
+                // Lock window state immediately upon creation
+                println!("🔐 Locking window state on startup");
+                let _ = window.unmaximize();
+                let _ = window.unminimize();
+                let _ = window.set_resizable(false);
+                let _ = window.set_minimizable(false);
+                let _ = window.set_maximizable(false);
+                let _ = window.set_size(tauri::PhysicalSize::new(800, 80));
+                let _ = window.set_min_size(Some(tauri::PhysicalSize::new(800, 80)));
+                let _ = window.set_max_size(Some(tauri::PhysicalSize::new(800, 80)));
+
                 println!("👁️  Showing bar on first launch");
                 let _ = window.show();
             }
@@ -395,12 +590,20 @@ pub fn run() {
 }
 
 // Helper that records the currently frontmost application so we can restore
-// focus later. Only meaningful on macOS.
+// focus later. Works on both macOS and Windows.
 fn remember_current_app() {
     #[cfg(target_os = "macos")]
     {
         if let Some(name) = get_frontmost_app() {
             println!("💾 Remembering current frontmost app: {}", name);
+            *LAST_APP_NAME.lock().unwrap() = Some(name);
+        }
+    }
+    
+    #[cfg(windows)]
+    {
+        if let Some(name) = get_frontmost_app() {
+            println!("💾 Windows: Remembering current frontmost app: {}", name);
             *LAST_APP_NAME.lock().unwrap() = Some(name);
         }
     }

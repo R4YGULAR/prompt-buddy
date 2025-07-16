@@ -17,6 +17,19 @@ interface Prompt {
   color: string;
 }
 
+// OS-specific keyboard shortcut utility
+const getKeyboardShortcuts = () => {
+  const platform = navigator.platform.toLowerCase();
+  const isMac = platform.includes('mac');
+  
+  return {
+    modifierSymbols: isMac ? '⌘⌥' : 'Ctrl+Alt+',
+    toggleShortcut: isMac ? 'Cmd+Shift+Enter' : 'Ctrl+Shift+Enter',
+    injectShortcut: (num: number) => isMac ? `⌘⌥${num}` : `Ctrl+Alt+${num}`,
+    injectDescription: isMac ? 'Cmd+Alt+1-9 to inject prompts' : 'Ctrl+Alt+1-9 to inject prompts'
+  };
+};
+
 const DEFAULT_PROMPTS: Prompt[] = [
   {
     id: "1",
@@ -87,6 +100,25 @@ function App() {
         await store.save();
         console.log('💾 Default prompts saved to store');
       }
+      
+      // Ensure consistent ordering every time prompts are loaded
+      saved.sort((a, b) => {
+        // For default prompts with numeric IDs, maintain original order
+        const aIsNumeric = /^\d+$/.test(a.id);
+        const bIsNumeric = /^\d+$/.test(b.id);
+        
+        if (aIsNumeric && bIsNumeric) {
+          return parseInt(a.id) - parseInt(b.id);
+        } else if (aIsNumeric && !bIsNumeric) {
+          return -1; // Default prompts first
+        } else if (!aIsNumeric && bIsNumeric) {
+          return 1; // Custom prompts after defaults
+        } else {
+          // Both are custom, sort by ID (which includes timestamp)
+          return a.id.localeCompare(b.id);
+        }
+      });
+      
       console.log('✅ Setting prompts to:', saved);
       setPrompts(saved);
       console.log('🎯 Prompts state updated, length:', saved.length);
@@ -98,6 +130,17 @@ function App() {
   useEffect(() => {
     console.log('🚀 Initial loadPrompts call');
     loadPrompts();
+    
+    // Lock window state on app startup
+    const lockInitialState = async () => {
+      try {
+        await invoke("lock_window_state");
+        console.log('🔐 Initial window state locked');
+      } catch (err) {
+        console.warn("Failed to lock initial window state", err);
+      }
+    };
+    lockInitialState();
   }, [loadPrompts]);
 
   useEffect(() => {
@@ -194,6 +237,17 @@ function App() {
     const unlistenPromise = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
       if (!focused) {
         setExpandedIndex(null);
+      } else {
+        // When window regains focus, ensure it's in proper state
+        const restoreWindowState = async () => {
+          try {
+            await invoke("restore_window_state");
+            await invoke("lock_window_state");
+          } catch (err) {
+            console.warn("Failed to restore window state on focus", err);
+          }
+        };
+        restoreWindowState();
       }
     });
 
@@ -220,6 +274,13 @@ function App() {
     setInjectedId(null);
     setErrorMessage("");
     try {
+      // Preserve window state before any focus switching
+      try {
+        await invoke("preserve_window_state");
+      } catch (err) {
+        console.warn("preserve_window_state failed", err);
+      }
+
       // If the prompt bar is hidden (e.g. the user used a global shortcut
       // without opening the UI), we first capture whichever application is
       // currently front-most so we can restore focus after injecting. When
@@ -243,16 +304,34 @@ function App() {
         console.warn("activate_last_app failed", err);
       }
 
-      // Give macOS a moment to actually switch focus.
+      // Give the system a moment to actually switch focus.
       await new Promise((r) => setTimeout(r, 300));
 
       await invoke<string>("inject_text", { text: prompt.content });
+      
+      // Restore window state after text injection
+      try {
+        await invoke("restore_window_state");
+        // Also aggressively lock the state to prevent future issues
+        await invoke("lock_window_state");
+      } catch (err) {
+        console.warn("restore_window_state failed", err);
+      }
+
       setInjectedId(prompt.id);
       setTimeout(() => setInjectedId(null), 2000);
     } catch (e) {
       console.error(e);
       setErrorMessage(`Failed to inject prompt ${shortcut}`);
       setTimeout(() => setErrorMessage(""), 3000);
+      
+      // Still try to restore window state even if injection failed
+      try {
+        await invoke("restore_window_state");
+        await invoke("lock_window_state");
+      } catch (err) {
+        console.warn("restore_window_state failed during error handling", err);
+      }
     }
   };
 
@@ -452,7 +531,7 @@ function App() {
               ) : (
                 <div className="prompt-info">
                   <div className="prompt-title">{p.title}</div>
-                  <div className="prompt-shortcut">⌘⌥{i + 1}</div>
+                  <div className="prompt-shortcut">{getKeyboardShortcuts().injectShortcut(i + 1)}</div>
                 </div>
               )}
 
