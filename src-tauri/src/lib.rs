@@ -14,7 +14,7 @@ use windows::{
     Win32::Foundation::HWND,
     Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, SetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
-        IsWindowVisible, ShowWindow, SW_RESTORE,
+        IsWindowVisible,
     },
     Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION},
     Win32::System::ProcessStatus::GetProcessImageFileNameW,
@@ -24,6 +24,9 @@ use windows::{
 // was shown. This lets us switch focus back to that application after the user
 // clicks a prompt pill so the text is inserted into the correct window.
 static LAST_APP_NAME: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+// Flag to track if we've captured the last app yet (only capture on first Alt+Space)
+static HAS_CAPTURED_LAST_APP: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 
 // Store the HWND on Windows for precise window management (as integer for thread safety)
 #[cfg(windows)]
@@ -70,56 +73,81 @@ fn get_frontmost_app() -> Option<String> {
         let mut process_id = 0u32;
         GetWindowThreadProcessId(foreground_window, Some(&mut process_id));
         
-        // Open the process to get its name
-        let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, false, process_id).ok()?;
+        // Get window title for debugging and potential fallback
+        let mut title_buffer = [0u16; 256];
+        let title_len = GetWindowTextW(foreground_window, &mut title_buffer);
+        let window_title = if title_len > 0 {
+            Some(String::from_utf16_lossy(&title_buffer[..title_len as usize]))
+        } else {
+            None
+        };
         
-        // Get the process executable name
-        let mut buffer = [0u16; 1024];
+        if let Some(ref title) = window_title {
+            println!("🪟 Windows: Captured window title: {}", title);
+        }
         
-        if GetProcessImageFileNameW(process_handle, &mut buffer) > 0 {
-            let process_path = String::from_utf16_lossy(&buffer);
-            // Extract just the filename from the full path
-            if let Some(filename) = process_path.split('\\').last() {
-                let name = filename.trim_end_matches('\0').to_string();
-                if !name.is_empty() {
-                    println!("🪟 Windows: Captured foreground app: {}", name);
-                    return Some(name);
+        // Priority 1: Try to get the process name (most reliable for app identification)
+        if let Ok(process_handle) = OpenProcess(PROCESS_QUERY_INFORMATION, false, process_id) {
+            let mut buffer = [0u16; 1024];
+            
+            if GetProcessImageFileNameW(process_handle, &mut buffer) > 0 {
+                let process_path = String::from_utf16_lossy(&buffer);
+                // Extract just the filename from the full path
+                if let Some(filename) = process_path.split('\\').last() {
+                    let name = filename.trim_end_matches('\0').to_string();
+                    if !name.is_empty() {
+                        println!("🪟 Windows: Captured foreground process: {}", name);
+                        return Some(name);
+                    }
                 }
             }
         }
         
-        // Fallback: try to get window title
-        let mut title_buffer = [0u16; 256];
-        let title_len = GetWindowTextW(foreground_window, &mut title_buffer);
-        if title_len > 0 {
-            let title = String::from_utf16_lossy(&title_buffer[..title_len as usize]);
-            println!("🪟 Windows: Got window title: {}", title);
-            return Some(title);
+        // Priority 2: Fallback to window title if process name failed
+        if let Some(title) = window_title {
+            if !title.is_empty() {
+                println!("🪟 Windows: Fallback to window title: {}", title);
+                return Some(title);
+            }
         }
         
         None
     }
 }
 
+
 #[cfg(windows)]
 fn activate_app(_app_name: &str) -> bool {
     unsafe {
         if let Some(hwnd_val) = *LAST_WINDOW_HWND.lock().unwrap() {
             let window = HWND(hwnd_val as *mut _);
-            println!("🪟 Windows: Attempting to reactivate window with HWND: {:?}", window.0);
+            println!("🪟 Windows: Attempting to reactivate last window with HWND: {:?}", window.0);
             
-            // First check if the window is still valid and visible
+            // Check if the window is still valid and visible
             if IsWindowVisible(window).as_bool() {
-                // Restore the window if it's minimized
-                let _ = ShowWindow(window, SW_RESTORE);
+                // Get window title for debugging
+                let mut title_buffer = [0u16; 256];
+                let title_len = GetWindowTextW(window, &mut title_buffer);
+                if title_len > 0 {
+                    let title = String::from_utf16_lossy(&title_buffer[..title_len as usize]);
+                    println!("🪟 Windows: Reactivating window: {}", title);
+                }
                 
-                // Set it as the foreground window
+                // Just bring it to foreground - don't mess with window state
                 let result = SetForegroundWindow(window).as_bool();
                 println!("🪟 Windows: SetForegroundWindow result: {}", result);
+                
+                // Give time for focus to settle
+                if result {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                }
+                
                 return result;
             } else {
                 println!("🪟 Windows: Stored window is no longer visible");
             }
+        } else {
+            println!("🪟 Windows: No window stored");
         }
         false
     }
@@ -210,7 +238,7 @@ async fn inject_text(text: String) -> Result<String, String> {
     println!("📝 Text to inject: '{}'", text);
     println!("📏 Text length: {} characters", text.len());
 
-    // Attempt to reactivate the previously focused application (macOS only).
+    // Attempt to reactivate the previously focused application (cross-platform).
     #[cfg(target_os = "macos")]
     {
         if let Some(app_name) = LAST_APP_NAME.lock().unwrap().clone() {
@@ -220,6 +248,18 @@ async fn inject_text(text: String) -> Result<String, String> {
             }
         } else {
             println!("ℹ️  No previously active app recorded – skipping re-activation");
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let Some(app_name) = LAST_APP_NAME.lock().unwrap().clone() {
+            println!("🔄 Windows: Reactivating previously active app: {}", app_name);
+            if !activate_app(&app_name) {
+                println!("⚠️  Windows: Failed to reactivate {}", app_name);
+            }
+        } else {
+            println!("ℹ️  Windows: No previously active app recorded – skipping re-activation");
         }
     }
     
@@ -235,8 +275,14 @@ async fn inject_text(text: String) -> Result<String, String> {
         error_msg
     })?;
     
-    println!("⏱️  Waiting 300ms after activating previous window...");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Longer wait on Windows to ensure focus switch completes
+    #[cfg(windows)]
+    let wait_time = 500;
+    #[cfg(not(windows))]
+    let wait_time = 300;
+    
+    println!("⏱️  Waiting {}ms after activating previous window...", wait_time);
+    std::thread::sleep(std::time::Duration::from_millis(wait_time));
     
     println!("⌨️  Attempting to type text...");
     
@@ -249,7 +295,11 @@ async fn inject_text(text: String) -> Result<String, String> {
         Err(e) => {
             let error_msg = format!("❌ Text injection failed: {}. This usually means no text field is currently focused or the app needs accessibility permissions.", e);
             println!("{}", error_msg);
-            Err("No active text field found or missing accessibility permissions. Please:\n1. Click on a text field to focus it\n2. Check System Preferences > Security & Privacy > Privacy > Accessibility".to_string())
+            #[cfg(windows)]
+            let help_msg = "No active text field found. Please:\n1. Click on a text field to focus it\n2. Make sure the target application is responsive";
+            #[cfg(not(windows))]
+            let help_msg = "No active text field found or missing accessibility permissions. Please:\n1. Click on a text field to focus it\n2. Check System Preferences > Security & Privacy > Privacy > Accessibility";
+            Err(help_msg.to_string())
         }
     }
 }
@@ -471,10 +521,12 @@ pub fn run() {
                                         println!("❌ Failed to hide window: {}", e);
                                     }
                                 } else {
-                                    // Before showing the window we record the app
-                                    // that is currently frontmost so we can switch
-                                    // back to it later when the user selects a prompt.
-                                    remember_current_app();
+                                    // Capture the frontmost app BEFORE showing our window (only first time)
+                                    if !*HAS_CAPTURED_LAST_APP.lock().unwrap() {
+                                        println!("🎯 First time showing prompt picker - capturing current frontmost app BEFORE showing window");
+                                        remember_current_app();
+                                        *HAS_CAPTURED_LAST_APP.lock().unwrap() = true;
+                                    }
 
                                     println!("👁️  Showing prompt picker bar");
                                     if let Err(e) = window.show() {
@@ -487,9 +539,14 @@ pub fn run() {
                             }
                             Err(e) => {
                                 println!("❌ Failed to get window visibility: {}", e);
-                                // Capture frontmost app before stealing focus
-                                remember_current_app();
-
+                                
+                                // Capture the frontmost app only on the FIRST time (error case)
+                                if !*HAS_CAPTURED_LAST_APP.lock().unwrap() {
+                                    println!("🎯 First time showing prompt picker (error case) - capturing current frontmost app");
+                                    remember_current_app();
+                                    *HAS_CAPTURED_LAST_APP.lock().unwrap() = true;
+                                }
+                                
                                 println!("🔄 Attempting to show window anyway...");
                                 if let Err(e) = window.show() {
                                     println!("❌ Failed to show window: {}", e);
@@ -563,10 +620,9 @@ pub fn run() {
             
             // Show window on first launch for better user experience
             if let Some(window) = app.get_webview_window("main") {
-                // Record the currently frontmost application BEFORE we bring
-                // the prompt bar to the foreground. This way we can return
-                // focus to it when the user clicks a prompt.
-                remember_current_app();
+                // Note: We no longer capture the last app on startup because that
+                // would capture the terminal that launched the app, not the user's
+                // actual working window. Instead, we capture on first Alt+Space press.
 
                 // Lock window state immediately upon creation
                 println!("🔐 Locking window state on startup");
@@ -579,8 +635,8 @@ pub fn run() {
                 let _ = window.set_min_size(Some(tauri::PhysicalSize::new(800, 80)));
                 let _ = window.set_max_size(Some(tauri::PhysicalSize::new(800, 80)));
 
-                println!("👁️  Showing bar on first launch");
-                let _ = window.show();
+                println!("🫥 Keeping bar hidden on startup - will show on first Alt+Space");
+                let _ = window.hide(); // Ensure it starts hidden
             }
             
             Ok(())
