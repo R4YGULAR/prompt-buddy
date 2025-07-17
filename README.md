@@ -53,7 +53,7 @@ A lightweight, always-on-top desktop app for quickly accessing and managing your
 
 ```bash
 # clone the repo
-git clone https://github.com/<your-org>/prompt-buddy.git
+git clone https://github.com/R4YGULAR/prompt-buddy.git
 cd prompt-buddy
 
 # install JavaScript dependencies
