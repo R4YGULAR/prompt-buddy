@@ -1,7 +1,7 @@
 # Prompt Picker
 **Languages | 语言**: [English](README.md) | [简体中文](README.zh-CN.md)
 
-A lightweight, always-on-top desktop app for quickly accessing and managing your most-used prompts for **Cursor**. Built with [Tauri v2](https://v2.tauri.app/), React and TypeScript for a fast, truly native feel and near-zero resource overhead.
+A lightweight, always-on-top desktop app for quickly accessing and managing your most-used prompts for **AI coding assistants** like Cursor, VS Code with Copilot, Claude Code, Tabnine, and more. Built with [Tauri v2](https://v2.tauri.app/), React and TypeScript for a fast, truly native feel and near-zero resource overhead.
 
 > **Heads-up ⚠️**
 > Windows builds are *not* available *yet*. At the moment Prompt Picker officially supports **macOS (13 Ventura or later)** only. Linux and Windows support are planned but not yet available.

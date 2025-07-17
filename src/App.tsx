@@ -281,20 +281,10 @@ function App() {
         console.warn("preserve_window_state failed", err);
       }
 
-      // If the prompt bar is hidden (e.g. the user used a global shortcut
-      // without opening the UI), we first capture whichever application is
-      // currently front-most so we can restore focus after injecting. When
-      // the bar is visible we skip this to avoid overwriting the saved app
-      // with the prompt picker itself.
-      try {
-        const win = getCurrentWindow();
-        const isVisible = await win.isVisible();
-        if (!isVisible) {
-          await invoke("capture_frontmost_app");
-        }
-      } catch (err) {
-        console.warn("capture_frontmost_app/isVisible failed", err);
-      }
+      // Note: We no longer capture the frontmost app here since it's captured
+      // once on startup. This prevents the bug where clicking pills would
+      // reactivate whatever window was active when you pressed Alt+Space
+      // instead of the truly "last active" window before Prompt Buddy appeared.
 
       // Now bring the previously active application back to the front so the
       // injected text goes to the correct place.

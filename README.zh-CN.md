@@ -1,6 +1,6 @@
 # Prompt Picker
 
-一个轻量级、始终置顶的桌面应用，可让你快速访问和管理在 Cursor 中常用的提示词（Prompt）。采用 Tauri v2 构建，拥有原生性能表现与优雅的亚克力玻璃 UI 效果。
+一个轻量级、始终置顶的桌面应用，可让你快速访问和管理在 **AI 编码助手**中常用的提示词（Prompt），支持 Cursor、VS Code with Copilot、Claude Code、Tabnine 等各种编码工具。采用 Tauri v2 构建，拥有原生性能表现与优雅的亚克力玻璃 UI 效果。
 
 > **下载版本重要提示 ⚠️**
 > 

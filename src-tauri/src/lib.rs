@@ -25,8 +25,6 @@ use windows::{
 // clicks a prompt pill so the text is inserted into the correct window.
 static LAST_APP_NAME: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
-// Flag to track if we've captured the last app yet (only capture on first Alt+Space)
-static HAS_CAPTURED_LAST_APP: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 
 // Store the HWND on Windows for precise window management (as integer for thread safety)
 #[cfg(windows)]
@@ -96,6 +94,14 @@ fn get_frontmost_app() -> Option<String> {
                 if let Some(filename) = process_path.split('\\').last() {
                     let name = filename.trim_end_matches('\0').to_string();
                     if !name.is_empty() {
+                        // Skip terminal/command prompt windows - we don't want to inject text there
+                        let name_lower = name.to_lowercase();
+                        if name_lower.contains("terminal") || name_lower.contains("cmd.exe") || 
+                           name_lower.contains("powershell") || name_lower.contains("conhost") {
+                            println!("🚫 Windows: Skipping terminal/console window: {}", name);
+                            return None; // This will trigger the title fallback or fail gracefully
+                        }
+                        
                         println!("🪟 Windows: Captured foreground process: {}", name);
                         return Some(name);
                     }
@@ -106,6 +112,14 @@ fn get_frontmost_app() -> Option<String> {
         // Priority 2: Fallback to window title if process name failed
         if let Some(title) = window_title {
             if !title.is_empty() {
+                // Also skip terminal windows based on title
+                let title_lower = title.to_lowercase();
+                if title_lower.contains("windows terminal") || title_lower.contains("command prompt") || 
+                   title_lower.contains("powershell") || title_lower.contains("cmd") {
+                    println!("🚫 Windows: Skipping terminal window by title: {}", title);
+                    return None;
+                }
+                
                 println!("🪟 Windows: Fallback to window title: {}", title);
                 return Some(title);
             }
@@ -277,7 +291,7 @@ async fn inject_text(text: String) -> Result<String, String> {
     
     // Longer wait on Windows to ensure focus switch completes
     #[cfg(windows)]
-    let wait_time = 500;
+    let wait_time = 750;
     #[cfg(not(windows))]
     let wait_time = 300;
     
@@ -286,20 +300,40 @@ async fn inject_text(text: String) -> Result<String, String> {
     
     println!("⌨️  Attempting to type text...");
     
-    // Try to type the text
-    match enigo.text(&text) {
-        Ok(_) => {
-            println!("✅ Text injection completed successfully");
-            Ok("Text injected successfully".to_string())
-        },
-        Err(e) => {
-            let error_msg = format!("❌ Text injection failed: {}. This usually means no text field is currently focused or the app needs accessibility permissions.", e);
-            println!("{}", error_msg);
-            #[cfg(windows)]
-            let help_msg = "No active text field found. Please:\n1. Click on a text field to focus it\n2. Make sure the target application is responsive";
-            #[cfg(not(windows))]
-            let help_msg = "No active text field found or missing accessibility permissions. Please:\n1. Click on a text field to focus it\n2. Check System Preferences > Security & Privacy > Privacy > Accessibility";
-            Err(help_msg.to_string())
+    // On Windows, type more slowly to avoid corruption
+    #[cfg(windows)]
+    {
+        // Type character by character with small delays to prevent corruption
+        for ch in text.chars() {
+            match enigo.text(&ch.to_string()) {
+                Ok(_) => {
+                    // Small delay between characters to prevent buffer overflow
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                },
+                Err(e) => {
+                    let error_msg = format!("❌ Text injection failed at character '{}': {}", ch, e);
+                    println!("{}", error_msg);
+                    return Err("Text injection failed. Please click on a text field to focus it.".to_string());
+                }
+            }
+        }
+        println!("✅ Text injection completed successfully (character by character)");
+        Ok("Text injected successfully".to_string())
+    }
+    
+    #[cfg(not(windows))]
+    {
+        // On other platforms, use the normal method
+        match enigo.text(&text) {
+            Ok(_) => {
+                println!("✅ Text injection completed successfully");
+                Ok("Text injected successfully".to_string())
+            },
+            Err(e) => {
+                let error_msg = format!("❌ Text injection failed: {}", e);
+                println!("{}", error_msg);
+                Err("No active text field found or missing accessibility permissions. Please:\n1. Click on a text field to focus it\n2. Check System Preferences > Security & Privacy > Privacy > Accessibility".to_string())
+            }
         }
     }
 }
@@ -521,12 +555,9 @@ pub fn run() {
                                         println!("❌ Failed to hide window: {}", e);
                                     }
                                 } else {
-                                    // Capture the frontmost app BEFORE showing our window (only first time)
-                                    if !*HAS_CAPTURED_LAST_APP.lock().unwrap() {
-                                        println!("🎯 First time showing prompt picker - capturing current frontmost app BEFORE showing window");
-                                        remember_current_app();
-                                        *HAS_CAPTURED_LAST_APP.lock().unwrap() = true;
-                                    }
+                                    // Always capture the frontmost app BEFORE showing our window for better UX
+                                    println!("🎯 Capturing current frontmost app BEFORE showing window");
+                                    remember_current_app();
 
                                     println!("👁️  Showing prompt picker bar");
                                     if let Err(e) = window.show() {
@@ -540,12 +571,9 @@ pub fn run() {
                             Err(e) => {
                                 println!("❌ Failed to get window visibility: {}", e);
                                 
-                                // Capture the frontmost app only on the FIRST time (error case)
-                                if !*HAS_CAPTURED_LAST_APP.lock().unwrap() {
-                                    println!("🎯 First time showing prompt picker (error case) - capturing current frontmost app");
-                                    remember_current_app();
-                                    *HAS_CAPTURED_LAST_APP.lock().unwrap() = true;
-                                }
+                                // Always capture the frontmost app (error case)
+                                println!("🎯 Capturing current frontmost app (error case)");
+                                remember_current_app();
                                 
                                 println!("🔄 Attempting to show window anyway...");
                                 if let Err(e) = window.show() {
@@ -661,6 +689,8 @@ fn remember_current_app() {
         if let Some(name) = get_frontmost_app() {
             println!("💾 Windows: Remembering current frontmost app: {}", name);
             *LAST_APP_NAME.lock().unwrap() = Some(name);
+        } else {
+            println!("⚠️  Windows: Could not find a suitable app to remember (probably terminal)");
         }
     }
 }
