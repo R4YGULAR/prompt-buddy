@@ -1,4 +1,5 @@
 use tauri::{AppHandle, Listener, Manager, Emitter};
+use std::process::Command;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -6,29 +7,10 @@ use enigo::{Enigo, Keyboard, Settings};
 use tauri::{WebviewWindowBuilder, WebviewUrl, LogicalPosition};
 use tauri_plugin_dialog;
 
-#[cfg(target_os = "macos")]
-use std::process::Command;
-
-#[cfg(windows)]
-use windows::{
-    Win32::Foundation::HWND,
-    Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, SetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
-        IsWindowVisible,
-    },
-    Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION},
-    Win32::System::ProcessStatus::GetProcessImageFileNameW,
-};
-
 // Store the name of the application that was active **before** the prompt bar
 // was shown. This lets us switch focus back to that application after the user
 // clicks a prompt pill so the text is inserted into the correct window.
 static LAST_APP_NAME: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
-
-
-// Store the HWND on Windows for precise window management (as integer for thread safety)
-#[cfg(windows)]
-static LAST_WINDOW_HWND: Lazy<Mutex<Option<isize>>> = Lazy::new(|| Mutex::new(None));
 
 #[cfg(target_os = "macos")]
 fn get_frontmost_app() -> Option<String> {
@@ -56,122 +38,11 @@ fn activate_app(app_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(windows)]
-fn get_frontmost_app() -> Option<String> {
-    unsafe {
-        let foreground_window = GetForegroundWindow();
-        if foreground_window.0.is_null() {
-            return None;
-        }
-
-        // Store the HWND for later reactivation (convert to integer for thread safety)
-        *LAST_WINDOW_HWND.lock().unwrap() = Some(foreground_window.0 as isize);
-
-        // Get the process ID
-        let mut process_id = 0u32;
-        GetWindowThreadProcessId(foreground_window, Some(&mut process_id));
-        
-        // Get window title for debugging and potential fallback
-        let mut title_buffer = [0u16; 256];
-        let title_len = GetWindowTextW(foreground_window, &mut title_buffer);
-        let window_title = if title_len > 0 {
-            Some(String::from_utf16_lossy(&title_buffer[..title_len as usize]))
-        } else {
-            None
-        };
-        
-        if let Some(ref title) = window_title {
-            println!("🪟 Windows: Captured window title: {}", title);
-        }
-        
-        // Priority 1: Try to get the process name (most reliable for app identification)
-        if let Ok(process_handle) = OpenProcess(PROCESS_QUERY_INFORMATION, false, process_id) {
-            let mut buffer = [0u16; 1024];
-            
-            if GetProcessImageFileNameW(process_handle, &mut buffer) > 0 {
-                let process_path = String::from_utf16_lossy(&buffer);
-                // Extract just the filename from the full path
-                if let Some(filename) = process_path.split('\\').last() {
-                    let name = filename.trim_end_matches('\0').to_string();
-                    if !name.is_empty() {
-                        // Skip terminal/command prompt windows - we don't want to inject text there
-                        let name_lower = name.to_lowercase();
-                        if name_lower.contains("terminal") || name_lower.contains("cmd.exe") || 
-                           name_lower.contains("powershell") || name_lower.contains("conhost") {
-                            println!("🚫 Windows: Skipping terminal/console window: {}", name);
-                            return None; // This will trigger the title fallback or fail gracefully
-                        }
-                        
-                        println!("🪟 Windows: Captured foreground process: {}", name);
-                        return Some(name);
-                    }
-                }
-            }
-        }
-        
-        // Priority 2: Fallback to window title if process name failed
-        if let Some(title) = window_title {
-            if !title.is_empty() {
-                // Also skip terminal windows based on title
-                let title_lower = title.to_lowercase();
-                if title_lower.contains("windows terminal") || title_lower.contains("command prompt") || 
-                   title_lower.contains("powershell") || title_lower.contains("cmd") {
-                    println!("🚫 Windows: Skipping terminal window by title: {}", title);
-                    return None;
-                }
-                
-                println!("🪟 Windows: Fallback to window title: {}", title);
-                return Some(title);
-            }
-        }
-        
-        None
-    }
-}
-
-
-#[cfg(windows)]
-fn activate_app(_app_name: &str) -> bool {
-    unsafe {
-        if let Some(hwnd_val) = *LAST_WINDOW_HWND.lock().unwrap() {
-            let window = HWND(hwnd_val as *mut _);
-            println!("🪟 Windows: Attempting to reactivate last window with HWND: {:?}", window.0);
-            
-            // Check if the window is still valid and visible
-            if IsWindowVisible(window).as_bool() {
-                // Get window title for debugging
-                let mut title_buffer = [0u16; 256];
-                let title_len = GetWindowTextW(window, &mut title_buffer);
-                if title_len > 0 {
-                    let title = String::from_utf16_lossy(&title_buffer[..title_len as usize]);
-                    println!("🪟 Windows: Reactivating window: {}", title);
-                }
-                
-                // Just bring it to foreground - don't mess with window state
-                let result = SetForegroundWindow(window).as_bool();
-                println!("🪟 Windows: SetForegroundWindow result: {}", result);
-                
-                // Give time for focus to settle
-                if result {
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                }
-                
-                return result;
-            } else {
-                println!("🪟 Windows: Stored window is no longer visible");
-            }
-        } else {
-            println!("🪟 Windows: No window stored");
-        }
-        false
-    }
-}
-
-// Stub helpers for other platforms
-#[cfg(not(any(target_os = "macos", windows)))]
+// Stub helpers for non-macOS platforms so compilation still succeeds.
+#[cfg(not(target_os = "macos"))]
 fn get_frontmost_app() -> Option<String> { None }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(target_os = "macos"))]
 fn activate_app(_app_name: &str) -> bool { false }
 
 #[derive(Clone, serde::Serialize)]
@@ -252,7 +123,7 @@ async fn inject_text(text: String) -> Result<String, String> {
     println!("📝 Text to inject: '{}'", text);
     println!("📏 Text length: {} characters", text.len());
 
-    // Attempt to reactivate the previously focused application (cross-platform).
+    // Attempt to reactivate the previously focused application (macOS only).
     #[cfg(target_os = "macos")]
     {
         if let Some(app_name) = LAST_APP_NAME.lock().unwrap().clone() {
@@ -262,18 +133,6 @@ async fn inject_text(text: String) -> Result<String, String> {
             }
         } else {
             println!("ℹ️  No previously active app recorded – skipping re-activation");
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        if let Some(app_name) = LAST_APP_NAME.lock().unwrap().clone() {
-            println!("🔄 Windows: Reactivating previously active app: {}", app_name);
-            if !activate_app(&app_name) {
-                println!("⚠️  Windows: Failed to reactivate {}", app_name);
-            }
-        } else {
-            println!("ℹ️  Windows: No previously active app recorded – skipping re-activation");
         }
     }
     
@@ -289,51 +148,21 @@ async fn inject_text(text: String) -> Result<String, String> {
         error_msg
     })?;
     
-    // Longer wait on Windows to ensure focus switch completes
-    #[cfg(windows)]
-    let wait_time = 750;
-    #[cfg(not(windows))]
-    let wait_time = 300;
-    
-    println!("⏱️  Waiting {}ms after activating previous window...", wait_time);
-    std::thread::sleep(std::time::Duration::from_millis(wait_time));
+    println!("⏱️  Waiting 300ms after activating previous window...");
+    std::thread::sleep(std::time::Duration::from_millis(300));
     
     println!("⌨️  Attempting to type text...");
     
-    // On Windows, type more slowly to avoid corruption
-    #[cfg(windows)]
-    {
-        // Type character by character with small delays to prevent corruption
-        for ch in text.chars() {
-            match enigo.text(&ch.to_string()) {
-                Ok(_) => {
-                    // Small delay between characters to prevent buffer overflow
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                },
-                Err(e) => {
-                    let error_msg = format!("❌ Text injection failed at character '{}': {}", ch, e);
-                    println!("{}", error_msg);
-                    return Err("Text injection failed. Please click on a text field to focus it.".to_string());
-                }
-            }
-        }
-        println!("✅ Text injection completed successfully (character by character)");
-        Ok("Text injected successfully".to_string())
-    }
-    
-    #[cfg(not(windows))]
-    {
-        // On other platforms, use the normal method
-        match enigo.text(&text) {
-            Ok(_) => {
-                println!("✅ Text injection completed successfully");
-                Ok("Text injected successfully".to_string())
-            },
-            Err(e) => {
-                let error_msg = format!("❌ Text injection failed: {}", e);
-                println!("{}", error_msg);
-                Err("No active text field found or missing accessibility permissions. Please:\n1. Click on a text field to focus it\n2. Check System Preferences > Security & Privacy > Privacy > Accessibility".to_string())
-            }
+    // Try to type the text
+    match enigo.text(&text) {
+        Ok(_) => {
+            println!("✅ Text injection completed successfully");
+            Ok("Text injected successfully".to_string())
+        },
+        Err(e) => {
+            let error_msg = format!("❌ Text injection failed: {}. This usually means no text field is currently focused or the app needs accessibility permissions.", e);
+            println!("{}", error_msg);
+            Err("No active text field found or missing accessibility permissions. Please:\n1. Click on a text field to focus it\n2. Check System Preferences > Security & Privacy > Privacy > Accessibility".to_string())
         }
     }
 }
@@ -403,7 +232,7 @@ async fn capture_frontmost_app() -> Result<(), String> {
 
 // Command that re-activates the application we previously captured with
 // `remember_current_app()`.  The frontend can call this right after a pill
-// click so focus is switched back before we start typing.
+// click so macOS focus is switched back before we start typing.
 #[tauri::command]
 async fn activate_last_app() -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -420,108 +249,11 @@ async fn activate_last_app() -> Result<(), String> {
         Ok(())
     }
 
-    #[cfg(windows)]
+    #[cfg(not(target_os = "macos"))]
     {
-        if let Some(app_name) = LAST_APP_NAME.lock().unwrap().clone() {
-            println!("🔄 Windows: Tauri cmd: activating last app = {}", app_name);
-            if activate_app(&app_name) {
-                return Ok(());
-            } else {
-                return Err(format!("Failed to activate {}", app_name));
-            }
-        }
-        println!("ℹ️  Windows: No last app recorded - nothing to activate");
+        println!("🔄 activate_last_app called on non-macOS platform – noop");
         Ok(())
     }
-
-    #[cfg(not(any(target_os = "macos", windows)))]
-    {
-        println!("🔄 activate_last_app called on unsupported platform – noop");
-        Ok(())
-    }
-}
-
-#[tauri::command]
-async fn preserve_window_state(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        println!("🔒 Preserving window state before focus switch");
-        
-        // Store current position and size before switching focus
-        if let Ok(position) = window.outer_position() {
-            println!("📍 Current position: {:?}", position);
-        }
-        if let Ok(size) = window.outer_size() {
-            println!("📏 Current size: {:?}", size);
-        }
-        
-        // Ensure the window is in a known good state before focus switch
-        let _ = window.set_resizable(false);
-        let _ = window.set_minimizable(false);
-        let _ = window.set_maximizable(false);
-        let _ = window.unmaximize(); // Ensure it's not maximized before we switch
-        
-        println!("🔒 Window prepared for focus switch");
-    }
-    Ok(())
-}
-
-#[tauri::command]
-async fn restore_window_state(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        println!("🔓 Restoring window state after text injection");
-        
-        // Force window to proper state immediately - never maximized
-        let _ = window.unmaximize();
-        let _ = window.unminimize();
-        
-        // Ensure window is still properly configured
-        let _ = window.set_always_on_top(true);
-        let _ = window.set_skip_taskbar(true);
-        let _ = window.set_resizable(false);
-        let _ = window.set_minimizable(false);
-        let _ = window.set_maximizable(false);
-        
-        // Force the exact size from config
-        let _ = window.set_size(tauri::PhysicalSize::new(800, 80));
-        
-        // Re-apply window constraints 
-        let _ = window.set_min_size(Some(tauri::PhysicalSize::new(800, 80)));
-        let _ = window.set_max_size(Some(tauri::PhysicalSize::new(800, 80)));
-        
-        // Ensure visibility and focus
-        if let Ok(is_visible) = window.is_visible() {
-            if is_visible {
-                let _ = window.set_focus();
-            }
-        }
-        
-        println!("✅ Window state restoration complete");
-    }
-    Ok(())
-}
-
-#[tauri::command]
-async fn lock_window_state(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        println!("🔐 Aggressively locking window state");
-        
-        // Force unmaximize multiple times
-        let _ = window.unmaximize();
-        let _ = window.unminimize();
-        
-        // Lock all the settings
-        let _ = window.set_resizable(false);
-        let _ = window.set_minimizable(false);
-        let _ = window.set_maximizable(false);
-        
-        // Force exact size
-        let _ = window.set_size(tauri::PhysicalSize::new(800, 80));
-        let _ = window.set_min_size(Some(tauri::PhysicalSize::new(800, 80)));
-        let _ = window.set_max_size(Some(tauri::PhysicalSize::new(800, 80)));
-        
-        println!("🔐 Window state locked");
-    }
-    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -532,7 +264,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![greet, inject_text, check_accessibility_permissions, toggle_window_visibility, show_popup, hide_popup, capture_frontmost_app, activate_last_app, preserve_window_state, restore_window_state, lock_window_state])
+        .invoke_handler(tauri::generate_handler![greet, inject_text, check_accessibility_permissions, toggle_window_visibility, show_popup, hide_popup, capture_frontmost_app, activate_last_app])
         .setup(|app| {
             println!("🔧 Setting up global shortcuts with handlers...");
             
@@ -555,8 +287,9 @@ pub fn run() {
                                         println!("❌ Failed to hide window: {}", e);
                                     }
                                 } else {
-                                    // Always capture the frontmost app BEFORE showing our window for better UX
-                                    println!("🎯 Capturing current frontmost app BEFORE showing window");
+                                    // Before showing the window we record the app
+                                    // that is currently frontmost so we can switch
+                                    // back to it later when the user selects a prompt.
                                     remember_current_app();
 
                                     println!("👁️  Showing prompt picker bar");
@@ -570,11 +303,9 @@ pub fn run() {
                             }
                             Err(e) => {
                                 println!("❌ Failed to get window visibility: {}", e);
-                                
-                                // Always capture the frontmost app (error case)
-                                println!("🎯 Capturing current frontmost app (error case)");
+                                // Capture frontmost app before stealing focus
                                 remember_current_app();
-                                
+
                                 println!("🔄 Attempting to show window anyway...");
                                 if let Err(e) = window.show() {
                                     println!("❌ Failed to show window: {}", e);
@@ -648,23 +379,13 @@ pub fn run() {
             
             // Show window on first launch for better user experience
             if let Some(window) = app.get_webview_window("main") {
-                // Note: We no longer capture the last app on startup because that
-                // would capture the terminal that launched the app, not the user's
-                // actual working window. Instead, we capture on first Alt+Space press.
+                // Record the currently frontmost application BEFORE we bring
+                // the prompt bar to the foreground. This way we can return
+                // focus to it when the user clicks a prompt.
+                remember_current_app();
 
-                // Lock window state immediately upon creation
-                println!("🔐 Locking window state on startup");
-                let _ = window.unmaximize();
-                let _ = window.unminimize();
-                let _ = window.set_resizable(false);
-                let _ = window.set_minimizable(false);
-                let _ = window.set_maximizable(false);
-                let _ = window.set_size(tauri::PhysicalSize::new(800, 80));
-                let _ = window.set_min_size(Some(tauri::PhysicalSize::new(800, 80)));
-                let _ = window.set_max_size(Some(tauri::PhysicalSize::new(800, 80)));
-
-                println!("🫥 Keeping bar hidden on startup - will show on first Alt+Space");
-                let _ = window.hide(); // Ensure it starts hidden
+                println!("👁️  Showing bar on first launch");
+                let _ = window.show();
             }
             
             Ok(())
@@ -674,23 +395,13 @@ pub fn run() {
 }
 
 // Helper that records the currently frontmost application so we can restore
-// focus later. Works on both macOS and Windows.
+// focus later. Only meaningful on macOS.
 fn remember_current_app() {
     #[cfg(target_os = "macos")]
     {
         if let Some(name) = get_frontmost_app() {
             println!("💾 Remembering current frontmost app: {}", name);
             *LAST_APP_NAME.lock().unwrap() = Some(name);
-        }
-    }
-    
-    #[cfg(windows)]
-    {
-        if let Some(name) = get_frontmost_app() {
-            println!("💾 Windows: Remembering current frontmost app: {}", name);
-            *LAST_APP_NAME.lock().unwrap() = Some(name);
-        } else {
-            println!("⚠️  Windows: Could not find a suitable app to remember (probably terminal)");
         }
     }
 }

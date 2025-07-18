@@ -13,13 +13,9 @@
     "windows": [
       {
         "title": "Prompt Buddy",
-        "width": 1000,
-        "height": 120,
-        "minWidth": 800,
-        "minHeight": 100,
-        "maxWidth": 1200,
-        "maxHeight": 150,
-        "resizable": true,
+        "width": 800,
+        "height": 80,
+        "resizable": false,
         "alwaysOnTop": true,
         "decorations": false,
         "transparent": true,
@@ -42,7 +38,8 @@
     "security": {
       "csp": null,
       "capabilities": ["main-capability"]
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,
