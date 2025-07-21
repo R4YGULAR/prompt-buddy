@@ -6,11 +6,51 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use enigo::{Enigo, Keyboard, Settings};
 use tauri::{WebviewWindowBuilder, WebviewUrl, LogicalPosition};
 use tauri_plugin_dialog;
+use serde::{Deserialize, Serialize};
+use tauri_plugin_store::StoreExt;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct AppSettings {
+    toggle_shortcut: String,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            toggle_shortcut: "alt+shift+space".to_string(),
+        }
+    }
+}
 
 // Store the name of the application that was active **before** the prompt bar
 // was shown. This lets us switch focus back to that application after the user
 // clicks a prompt pill so the text is inserted into the correct window.
 static LAST_APP_NAME: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+fn load_settings(app: &AppHandle) -> AppSettings {
+    match app.store("settings.json") {
+        Ok(store) => {
+            if let Some(settings) = store.get("settings") {
+                match serde_json::from_value::<AppSettings>(settings) {
+                    Ok(settings) => {
+                        println!("✅ Loaded settings: {:?}", settings);
+                        return settings;
+                    },
+                    Err(e) => {
+                        println!("⚠️  Failed to parse settings: {}", e);
+                    }
+                }
+            }
+        },
+        Err(e) => {
+            println!("⚠️  Failed to load settings store: {}", e);
+        }
+    }
+    
+    let default_settings = AppSettings::default();
+    println!("🔧 Using default settings: {:?}", default_settings);
+    default_settings
+}
 
 #[cfg(target_os = "macos")]
 fn get_frontmost_app() -> Option<String> {
@@ -268,13 +308,17 @@ pub fn run() {
         .setup(|app| {
             println!("🔧 Setting up global shortcuts with handlers...");
             
+            // Load settings to get the configured shortcut
+            let settings = load_settings(&app.handle());
+            
             // Register main shortcut with handler in one step
-            println!("🎯 Registering main toggle shortcut...");
-            let main_shortcut: Shortcut = "alt+space".parse().map_err(|e| format!("Failed to parse main shortcut: {}", e))?;
+            println!("🎯 Registering main toggle shortcut: {}...", settings.toggle_shortcut);
+            let shortcut_string = settings.toggle_shortcut.clone();
+            let main_shortcut: Shortcut = settings.toggle_shortcut.parse().map_err(|e| format!("Failed to parse main shortcut '{}': {}", settings.toggle_shortcut, e))?;
             match app.handle().global_shortcut().on_shortcut(main_shortcut, move |_app, _shortcut, _state| {
                 // Only act on key *press* events so the shortcut truly toggles.
                 if _state.state() == ShortcutState::Pressed {
-                    println!("🎯 Global shortcut (Alt+Space) pressed!");
+                    println!("🎯 Global shortcut ({}) pressed!", shortcut_string);
 
                     if let Some(window) = _app.get_webview_window("main") {
                         println!("✅ Found main window");
@@ -320,11 +364,11 @@ pub fn run() {
                 }
             }) {
                 Ok(_) => {
-                    println!("✅ Main shortcut (Alt+Space) registered successfully!");
+                    println!("✅ Main shortcut ({}) registered successfully!", settings.toggle_shortcut);
                 }
                 Err(e) => {
                     println!("❌ Failed to register main shortcut: {}", e);
-                    println!("⚠️  You can still use the app manually, but Alt+Space won't work");
+                    println!("⚠️  You can still use the app manually, but {} won't work", settings.toggle_shortcut);
                 }
             }
             

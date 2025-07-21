@@ -2,6 +2,9 @@ import { useState, useEffect } from "react";
 import { Store } from "@tauri-apps/plugin-store";
 import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Wand2, Sparkles, Loader2, Crown, Lock } from "lucide-react";
+import { createOpenRouterClient } from "./services/openrouter";
+import { licenseManager } from "./services/license";
 import "./App.css";
 
 interface Prompt {
@@ -68,6 +71,11 @@ function PromptEditor() {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const [enhancementRequest, setEnhancementRequest] = useState("");
+  const [isEnhancing, setIsEnhancing] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generationPrompt, setGenerationPrompt] = useState("");
+  const [hasProLicense, setHasProLicense] = useState(false);
 
   useEffect(() => {
     console.log('PromptEditor useEffect, index:', index);
@@ -78,6 +86,11 @@ function PromptEditor() {
         console.log('Store loaded');
         let saved = await store.get<Prompt[]>('prompts') || [];
         console.log('Got saved prompts:', saved);
+        
+        // Check license status
+        const proLicense = await licenseManager.hasProLicense();
+        setHasProLicense(proLicense);
+        
         if (saved.length === 0) saved = DEFAULT_PROMPTS;
         if (index >= 0 && index < saved.length) {
           const p = saved[index];
@@ -143,6 +156,14 @@ function PromptEditor() {
         saved[index] = { ...prompt, title: title.trim(), content: content.trim() };
       } else if (index === -1) {
         console.log('➕ Adding new prompt');
+        
+        // Check if user can add another prompt
+        const canAddResult = await licenseManager.canAddPrompt(saved.length);
+        if (!canAddResult.canAdd) {
+          alert(`🔒 Prompt Limit Reached\n\n${canAddResult.reason}`);
+          return;
+        }
+        
         const newId = (saved.length + 1).toString();
         const newPrompt = { 
           id: newId, 
@@ -208,6 +229,65 @@ function PromptEditor() {
     await win.close();
   };
 
+  const showUpgradeAlert = () => {
+    alert('🔒 PRO Feature Required\n\nAI-powered prompt generation and enhancement are available in Prompt Buddy PRO.\n\nUpgrade to unlock:\n• AI prompt generation\n• Smart prompt enhancement\n• Advanced customization\n\nVisit the Settings to activate your license!');
+  };
+
+  const enhancePrompt = async () => {
+    if (!hasProLicense) {
+      showUpgradeAlert();
+      return;
+    }
+
+    if (!enhancementRequest.trim()) {
+      alert('Please describe how you want to enhance the prompt');
+      return;
+    }
+
+    setIsEnhancing(true);
+    try {
+      const client = createOpenRouterClient();
+      const enhanced = await client.enhancePrompt(content, enhancementRequest);
+      setContent(enhanced);
+      setEnhancementRequest('');
+    } catch (error) {
+      console.error('Error enhancing prompt:', error);
+      alert(`Failed to enhance prompt: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsEnhancing(false);
+    }
+  };
+
+  const generateFromDescription = async () => {
+    if (!hasProLicense) {
+      showUpgradeAlert();
+      return;
+    }
+
+    if (!generationPrompt.trim()) {
+      alert('Please describe the prompt you want to generate');
+      return;
+    }
+
+    setIsGenerating(true);
+    try {
+      const client = createOpenRouterClient();
+      const generated = await client.generatePrompt(generationPrompt);
+      setContent(generated);
+      if (!title.trim()) {
+        // Auto-generate a title from the first few words
+        const words = generationPrompt.split(' ').slice(0, 4).join(' ');
+        setTitle(words.charAt(0).toUpperCase() + words.slice(1));
+      }
+      setGenerationPrompt('');
+    } catch (error) {
+      console.error('Error generating prompt:', error);
+      alert(`Failed to generate prompt: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
   if (!loaded) {
     return <div className="prompt-editor">Loading...</div>;
   }
@@ -219,6 +299,7 @@ function PromptEditor() {
   return (
     <div className="prompt-editor">
       <h2>{index >= 0 ? `Edit Prompt ${index + 1}` : "Add New Prompt"}</h2>
+
       <label>
         Title:
         <input
@@ -227,15 +308,99 @@ function PromptEditor() {
           className="editor-input"
         />
       </label>
+
+      {/* AI Generation Section */}
+      {!content && (
+        <div className={`ai-generation-section ${!hasProLicense ? 'locked-section' : ''}`}>
+          <h3>
+            <Sparkles size={16} /> 
+            Generate with AI 
+            {!hasProLicense && <Crown size={14} className="pro-icon" />}
+          </h3>
+          {!hasProLicense ? (
+            <div className="locked-content">
+              <div className="lock-message">
+                <Lock size={24} className="lock-icon" />
+                <p>AI generation is a PRO feature</p>
+                <button onClick={showUpgradeAlert} className="upgrade-btn">
+                  <Crown size={16} />
+                  Upgrade to PRO
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="generation-input">
+              <textarea
+                value={generationPrompt}
+                onChange={(e) => setGenerationPrompt(e.target.value)}
+                placeholder="Describe the prompt you want to generate (e.g., 'Create a prompt for code review that focuses on security and performance')"
+                className="generation-textarea"
+                rows={3}
+              />
+              <button 
+                onClick={generateFromDescription}
+                disabled={isGenerating || !generationPrompt.trim()}
+                className="generate-btn"
+              >
+                {isGenerating ? <Loader2 size={16} className="spinner" /> : <Sparkles size={16} />}
+                {isGenerating ? 'Generating...' : 'Generate Prompt'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       <label>
         Content:
         <textarea
           value={content}
           onChange={(e) => setContent(e.target.value)}
           className="editor-textarea"
-          rows={5}
+          rows={8}
         />
       </label>
+
+      {/* AI Enhancement Section */}
+      {content && (
+        <div className={`ai-enhancement-section ${!hasProLicense ? 'locked-section' : ''}`}>
+          <h3>
+            <Wand2 size={16} /> 
+            Enhance with AI 
+            {!hasProLicense && <Crown size={14} className="pro-icon" />}
+          </h3>
+          {!hasProLicense ? (
+            <div className="locked-content">
+              <div className="lock-message">
+                <Lock size={24} className="lock-icon" />
+                <p>AI enhancement is a PRO feature</p>
+                <button onClick={showUpgradeAlert} className="upgrade-btn">
+                  <Crown size={16} />
+                  Upgrade to PRO
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="enhancement-input">
+              <input
+                type="text"
+                value={enhancementRequest}
+                onChange={(e) => setEnhancementRequest(e.target.value)}
+                placeholder="How should this prompt be improved? (e.g., 'make it more specific', 'add error handling focus', 'make it shorter')"
+                className="enhancement-text-input"
+              />
+              <button 
+                onClick={enhancePrompt}
+                disabled={isEnhancing || !enhancementRequest.trim()}
+                className="enhance-btn"
+              >
+                {isEnhancing ? <Loader2 size={16} className="spinner" /> : <Wand2 size={16} />}
+                {isEnhancing ? 'Enhancing...' : 'Enhance'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="editor-buttons">
         <button onClick={save} className="save-btn">Save</button>
         <button onClick={cancel} className="cancel-btn">Cancel</button>

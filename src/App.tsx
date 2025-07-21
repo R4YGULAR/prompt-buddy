@@ -4,11 +4,12 @@ import { Store } from "@tauri-apps/plugin-store";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Settings, X, Pencil } from "lucide-react";
+import { Settings, X, Pencil, Crown, AlertCircle } from "lucide-react";
 import "./App.css";
 import { PhysicalPosition } from "@tauri-apps/api/window";
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { emit } from "@tauri-apps/api/event";
+import { licenseManager } from "./services/license";
 
 interface Prompt {
   id: string;
@@ -67,8 +68,37 @@ function App() {
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
   const [injectedId, setInjectedId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
+  const [hasProLicense, setHasProLicense] = useState(false);
+  const [promptLimitInfo, setPromptLimitInfo] = useState({
+    isAtLimit: false,
+    isNearLimit: false,
+    remainingPrompts: 5,
+    totalAllowed: 11
+  });
   const pillRefs = useRef<(HTMLDivElement | null)[]>([]);
   const addPillRef = useRef<HTMLDivElement | null>(null);
+
+  /* --------------------------------------------------
+   * Load license info and prompt limits
+   * -------------------------------------------------- */
+  const loadLicenseInfo = useCallback(async () => {
+    try {
+      const hasProLicense = await licenseManager.hasProLicense();
+      setHasProLicense(hasProLicense);
+    } catch (error) {
+      console.error('❌ Error loading license info:', error);
+      setHasProLicense(false);
+    }
+  }, []);
+
+  const updatePromptLimits = useCallback(async (promptCount: number) => {
+    try {
+      const limitInfo = await licenseManager.getPromptLimitInfo(promptCount);
+      setPromptLimitInfo(limitInfo);
+    } catch (error) {
+      console.error('❌ Error getting prompt limit info:', error);
+    }
+  }, []);
 
   /* --------------------------------------------------
    * Load & persist prompts
@@ -89,11 +119,16 @@ function App() {
       }
       console.log('✅ Setting prompts to:', saved);
       setPrompts(saved);
+      
+      // Update license info and prompt limits
+      await loadLicenseInfo();
+      await updatePromptLimits(saved.length);
+      
       console.log('🎯 Prompts state updated, length:', saved.length);
     } catch (error) {
       console.error('❌ Error in loadPrompts:', error);
     }
-  }, []);
+  }, [loadLicenseInfo, updatePromptLimits]);
 
   useEffect(() => {
     console.log('🚀 Initial loadPrompts call');
@@ -461,11 +496,18 @@ function App() {
               />
             </div>
           ))}
-          {prompts.length < 9 && (
+          {prompts.length < 9 && !promptLimitInfo.isAtLimit && (
             <div
               ref={addPillRef}
               className="prompt-pill add-pill"
-              onClick={() => {
+              onClick={async () => {
+                // Check if user can add another prompt
+                const canAddResult = await licenseManager.canAddPrompt(prompts.length);
+                if (!canAddResult.canAdd) {
+                  alert(`🔒 Prompt Limit Reached\n\n${canAddResult.reason}`);
+                  return;
+                }
+                
                 if (addPillRef.current) {
                   openEditWindow(-1, addPillRef.current);
                 } else {
@@ -478,10 +520,31 @@ function App() {
               </div>
             </div>
           )}
+          {!hasProLicense && promptLimitInfo.isAtLimit && (
+            <div className="prompt-pill add-pill locked-add-pill">
+              <div className="prompt-badge">
+                <Crown size={20} className="pro-icon" />
+              </div>
+              <div className="upgrade-tooltip">
+                <p>🔒 Prompt Limit Reached</p>
+                <p>Upgrade to PRO for unlimited prompts!</p>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Controls */}
         <div className="bar-controls" data-tauri-drag-region="false">
+          {!hasProLicense && (
+            <div className="prompt-limit-indicator">
+              {promptLimitInfo.isNearLimit || promptLimitInfo.isAtLimit ? (
+                <AlertCircle size={14} className="warning-icon" />
+              ) : null}
+              <span className={`limit-text ${promptLimitInfo.isNearLimit ? 'near-limit' : ''} ${promptLimitInfo.isAtLimit ? 'at-limit' : ''}`}>
+                {promptLimitInfo.remainingPrompts}/{promptLimitInfo.totalAllowed}
+              </span>
+            </div>
+          )}
           <button
             className="control-btn"
             onClick={openSettingsWindow}

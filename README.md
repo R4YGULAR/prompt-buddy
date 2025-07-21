@@ -1,4 +1,4 @@
-# Prompt Picker
+# Prompt Buddy
 **Languages | 语言**: [English](README.md) | [简体中文](README.zh-CN.md)
 
 A lightweight, always-on-top desktop app for quickly accessing and managing your most-used prompts for **AI coding assistants** like Cursor, VS Code with Copilot, Claude Code, Tabnine, and more. Built with [Tauri v2](https://v2.tauri.app/), React and TypeScript for a fast, truly native feel and near-zero resource overhead.
@@ -10,12 +10,19 @@ A lightweight, always-on-top desktop app for quickly accessing and managing your
 
 ## ✨ Features
 
+### 🆓 Free Features
 - **Liquid-glass UI** – Gorgeous transparent design that blends into macOS.
 - **Always on Top** – Keep your favourite prompts one click away while you code.
 - **One-Click Copy** – Tap any prompt to instantly copy it to your clipboard.
-- **Fully Customisable** – Add, edit or delete prompts; they persist automatically.
+- **Basic Customization** – Add up to 5 custom prompts (11 total including defaults).
 - **Dark-Mode Aware** – Adapts to your system appearance.
 - **Tiny Footprint** – Powered by Tauri – starts fast and uses little RAM.
+
+### 👑 PRO Features
+- **Unlimited Prompts** – Create as many custom prompts as you need.
+- **AI Prompt Generation** – Create new prompts from natural language descriptions.
+- **AI Prompt Enhancement** – Intelligently improve existing prompts with specific requests.
+- **Powered by Kimi 32B** – Advanced AI model for high-quality prompt optimization.
 
 ---
 
@@ -58,6 +65,10 @@ cd prompt-buddy
 
 # install JavaScript dependencies
 npm install
+
+# (Optional) Set up AI features for PRO users - copy the example env file
+cp .env.example .env
+# Then edit .env and add your OpenRouter API key
 ```
 
 ### 3 · Run in Development
@@ -83,7 +94,21 @@ The signed DMG can be found under `src-tauri/target/release/bundle/dmg`.
 1. **Launch the app** – The small floating window stays in front of everything.
 2. **Click a prompt** – It is copied to your clipboard instantly.
 3. **Manage prompts** – Use the ✏️ / ➕ / ✕ icons to edit, create or delete.
-4. **Reset defaults** – Open **Settings → Reset to defaults**.
+4. **AI Enhancement** – In the prompt editor, use "Generate with AI" or "Enhance with AI" features.
+5. **Reset defaults** – Open **Settings → Reset to defaults**.
+
+### 👑 PRO License & AI Features
+
+To unlock AI-powered features:
+
+1. **Get a PRO License**: Contact us for licensing information
+2. **Activate License**: Enter your license key in Settings → License Status
+3. **Set up OpenRouter** (for developers):
+   - Get an API key from [OpenRouter](https://openrouter.ai/keys)  
+   - Add it to your `.env` file: `VITE_OPENROUTER_API_KEY=sk-or-v1-your-api-key-here`
+   - Restart the app
+
+**Demo Keys**: Use "Generate Demo Key" in settings to try PRO features for free!
 
 ---
 
