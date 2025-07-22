@@ -4,10 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Prompt Buddy is a cross-platform desktop app built with Tauri v2, React, and TypeScript. It provides a floating prompt picker for Cursor AI, allowing users to quickly access and inject pre-defined prompts via keyboard shortcuts or UI interactions.
+Prompt Buddy is a complete SaaS solution consisting of:
+
+1. **Desktop App** (root directory): Cross-platform desktop app built with Tauri v2, React, and TypeScript. Provides a floating prompt picker for AI coding assistants.
+
+2. **Web App** (`webapp/` directory): SaaS platform built with Next.js 15, Supabase, and Tailwind CSS. Handles authentication, licensing, and user management.
 
 ## Development Commands
 
+### Desktop App (Root Directory)
 ```bash
 # Install dependencies
 npm install
@@ -18,8 +23,27 @@ npm run tauri dev
 # Build production release
 npm run tauri build
 
-# Lint and type check (inferred from package.json)
+# Lint and type check
 npm run build  # Runs: tsc && vite build
+```
+
+### Web App (webapp/ Directory)
+```bash
+# Navigate to web app
+cd webapp
+
+# Install dependencies
+npm install
+
+# Set up environment variables
+cp .env.example .env.local
+# Edit .env.local with your Supabase credentials
+
+# Run development server
+npm run dev
+
+# Build for production
+npm run build
 ```
 
 ## Architecture

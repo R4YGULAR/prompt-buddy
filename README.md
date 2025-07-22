@@ -122,11 +122,31 @@ To unlock AI-powered features:
 
 ## 🛠 Development
 
-Prompt Picker is built with:
+### Desktop App
+Prompt Buddy desktop is built with:
 
 - [Tauri v2](https://v2.tauri.app/) – cross-platform desktop framework
 - [React](https://react.dev/) + [TypeScript](https://www.typescriptlang.org/)
 - [Lucide React](https://lucide.dev/) – pixel-perfect icons
+
+### Web App
+The SaaS platform is built with:
+
+- [Next.js 15](https://nextjs.org/) – React framework with App Router
+- [Supabase](https://supabase.com/) – Database, Auth, and Backend
+- [Tailwind CSS](https://tailwindcss.com/) – Styling
+- [Stripe](https://stripe.com/) – Payment processing
+
+#### Getting Started with Web App
+```bash
+cd webapp
+npm install
+cp .env.example .env.local
+# Add your Supabase credentials to .env.local
+npm run dev
+```
+
+See `webapp/SETUP.md` for detailed setup instructions.
 
 ---
 
