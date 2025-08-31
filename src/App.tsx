@@ -16,6 +16,15 @@ interface Prompt {
   title: string;
   content: string;
   color: string;
+  folderId?: string;
+}
+
+interface Folder {
+  id: string;
+  name: string;
+  color: string;
+  isExpanded: boolean;
+  prompts: Prompt[];
 }
 
 const DEFAULT_PROMPTS: Prompt[] = [
@@ -65,6 +74,7 @@ const DEFAULT_PROMPTS: Prompt[] = [
 
 function App() {
   const [prompts, setPrompts] = useState<Prompt[]>(DEFAULT_PROMPTS);
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
   const [injectedId, setInjectedId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string>("");
@@ -75,6 +85,8 @@ function App() {
     remainingPrompts: 5,
     totalAllowed: 11
   });
+  const [draggedPromptId, setDraggedPromptId] = useState<string | null>(null);
+  const [dragOverPromptId, setDragOverPromptId] = useState<string | null>(null);
   const pillRefs = useRef<(HTMLDivElement | null)[]>([]);
   const addPillRef = useRef<HTMLDivElement | null>(null);
 
@@ -109,7 +121,8 @@ function App() {
       const store = await Store.load("prompts.json");
       console.log('📁 Store loaded');
       let saved = await store.get<Prompt[]>("prompts");
-      console.log('📋 Raw saved prompts:', saved);
+      let savedFolders = await store.get<Folder[]>("folders") || [];
+      console.log('📋 Raw saved prompts:', saved, 'folders:', savedFolders);
       if (!saved || saved.length === 0) {
         console.log('📋 No saved prompts, using defaults');
         saved = DEFAULT_PROMPTS;
@@ -119,6 +132,7 @@ function App() {
       }
       console.log('✅ Setting prompts to:', saved);
       setPrompts(saved);
+      setFolders(savedFolders);
       
       // Update license info and prompt limits
       await loadLicenseInfo();
@@ -251,43 +265,28 @@ function App() {
   /* --------------------------------------------------
    * Inject text helper
    * -------------------------------------------------- */
-  const injectTextViaShortcut = async (prompt: Prompt, shortcut: number) => {
+  const injectTextViaShortcut = async (prompt: Prompt, _shortcut: number) => {
     setInjectedId(null);
     setErrorMessage("");
     try {
-      // If the prompt bar is hidden (e.g. the user used a global shortcut
-      // without opening the UI), we first capture whichever application is
-      // currently front-most so we can restore focus after injecting. When
-      // the bar is visible we skip this to avoid overwriting the saved app
-      // with the prompt picker itself.
-      try {
-        const win = getCurrentWindow();
-        const isVisible = await win.isVisible();
-        if (!isVisible) {
-          await invoke("capture_frontmost_app");
-        }
-      } catch (err) {
-        console.warn("capture_frontmost_app/isVisible failed", err);
-      }
-
-      // Now bring the previously active application back to the front so the
-      // injected text goes to the correct place.
-      try {
-        await invoke("activate_last_app");
-      } catch (err) {
-        console.warn("activate_last_app failed", err);
-      }
-
-      // Give macOS a moment to actually switch focus.
-      await new Promise((r) => setTimeout(r, 300));
-
-      await invoke<string>("inject_text", { text: prompt.content });
+      // Start click-to-inject mode - this will hide the window and wait for user click
+      console.log(`🚀 Starting click-to-inject for prompt: ${prompt.title}`);
+      
+      // Show a brief message to explain what's happening
+      setErrorMessage("🖱️ Click anywhere to trigger injection...");
+      
+      await invoke<string>("inject_text_at_cursor", { text: prompt.content });
       setInjectedId(prompt.id);
-      setTimeout(() => setInjectedId(null), 2000);
+      setErrorMessage("✅ Text injected successfully!");
+      setTimeout(() => {
+        setInjectedId(null);
+        setErrorMessage("");
+      }, 2000);
     } catch (e) {
       console.error(e);
-      setErrorMessage(`Failed to inject prompt ${shortcut}`);
-      setTimeout(() => setErrorMessage(""), 3000);
+      const errorMessage = typeof e === 'string' ? e : 'Unknown error occurred';
+      setErrorMessage(`❌ ${errorMessage}`);
+      setTimeout(() => setErrorMessage(""), 5000);
     }
   };
 
@@ -418,6 +417,151 @@ function App() {
   };
 
   /* --------------------------------------------------
+   * Folder management functions
+   * -------------------------------------------------- */
+  const toggleFolder = async (folderId: string) => {
+    if (!hasProLicense) return;
+    
+    try {
+      const store = await Store.load("prompts.json");
+      let savedFolders = await store.get<Folder[]>("folders") || [];
+      
+      const folderIndex = savedFolders.findIndex(f => f.id === folderId);
+      if (folderIndex !== -1) {
+        savedFolders[folderIndex].isExpanded = !savedFolders[folderIndex].isExpanded;
+        await store.set("folders", savedFolders);
+        await store.save();
+        setFolders(savedFolders);
+      }
+    } catch (error) {
+      console.error('Error toggling folder:', error);
+    }
+  };
+
+
+  // Get prompts that are not in any folder (for display in main bar)
+  const getUnfolderedPrompts = () => {
+    return prompts.filter(p => !p.folderId);
+  };
+
+  // Get all prompts in expanded folders (for display in main bar)
+  const getExpandedFolderPrompts = () => {
+    return folders
+      .filter(f => f.isExpanded)
+      .flatMap(f => f.prompts)
+      .slice(0, Math.max(0, 9 - getUnfolderedPrompts().length));
+  };
+
+  // Get final list of prompts to display in the main bar
+  const getDisplayPrompts = () => {
+    const unfolderedPrompts = getUnfolderedPrompts();
+    const expandedFolderPrompts = getExpandedFolderPrompts();
+    return [...unfolderedPrompts, ...expandedFolderPrompts].slice(0, 9);
+  };
+
+  /* --------------------------------------------------
+   * Drag and Drop functions
+   * -------------------------------------------------- */
+  const handleDragStart = (e: React.DragEvent, promptId: string) => {
+    if (!hasProLicense) return;
+    
+    setDraggedPromptId(promptId);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', promptId);
+  };
+
+  const handleDragOver = (e: React.DragEvent, targetPromptId: string) => {
+    if (!hasProLicense || !draggedPromptId || draggedPromptId === targetPromptId) return;
+    
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDragOverPromptId(targetPromptId);
+  };
+
+  const handleDragLeave = () => {
+    setDragOverPromptId(null);
+  };
+
+  const handleDrop = async (e: React.DragEvent, targetPromptId: string) => {
+    if (!hasProLicense || !draggedPromptId || draggedPromptId === targetPromptId) return;
+    
+    e.preventDefault();
+    setDragOverPromptId(null);
+    
+    try {
+      const store = await Store.load("prompts.json");
+      let savedPrompts = await store.get<Prompt[]>("prompts") || [];
+      let savedFolders = await store.get<Folder[]>("folders") || [];
+      
+      const draggedPrompt = savedPrompts.find(p => p.id === draggedPromptId);
+      const targetPrompt = savedPrompts.find(p => p.id === targetPromptId);
+      
+      if (!draggedPrompt || !targetPrompt) {
+        console.error('Could not find dragged or target prompt');
+        setDraggedPromptId(null);
+        return;
+      }
+      
+      // Check if target prompt is already in a folder
+      const existingFolder = savedFolders.find(f => f.prompts.some(p => p.id === targetPromptId));
+      
+      if (existingFolder) {
+        // Add dragged prompt to existing folder
+        if (!existingFolder.prompts.some(p => p.id === draggedPromptId)) {
+          draggedPrompt.folderId = existingFolder.id;
+          existingFolder.prompts.push(draggedPrompt);
+          
+          // Remove from any other folders
+          savedFolders.forEach(folder => {
+            if (folder.id !== existingFolder.id) {
+              folder.prompts = folder.prompts.filter(p => p.id !== draggedPromptId);
+            }
+          });
+        }
+      } else {
+        // Create new folder with both prompts
+        const folderName = `${targetPrompt.title} & ${draggedPrompt.title}`.substring(0, 20);
+        const newFolder: Folder = {
+          id: `folder_${Date.now()}`,
+          name: folderName,
+          color: "from-gray-500 to-gray-600",
+          isExpanded: true,
+          prompts: [targetPrompt, draggedPrompt]
+        };
+        
+        // Update prompt folder references
+        targetPrompt.folderId = newFolder.id;
+        draggedPrompt.folderId = newFolder.id;
+        
+        // Remove prompts from any existing folders
+        savedFolders.forEach(folder => {
+          folder.prompts = folder.prompts.filter(p => p.id !== targetPromptId && p.id !== draggedPromptId);
+        });
+        
+        savedFolders.push(newFolder);
+      }
+      
+      await store.set("prompts", savedPrompts);
+      await store.set("folders", savedFolders);
+      await store.save();
+      
+      setPrompts(savedPrompts);
+      setFolders(savedFolders);
+      
+      await emit("prompts-updated");
+    } catch (error) {
+      console.error('Error creating folder:', error);
+    } finally {
+      setDraggedPromptId(null);
+    }
+  };
+
+  const handleDragEnd = () => {
+    setDraggedPromptId(null);
+    setDragOverPromptId(null);
+  };
+
+  /* --------------------------------------------------
    * Render
    * -------------------------------------------------- */
   return (
@@ -426,16 +570,46 @@ function App() {
 
       <div className="bar-content" data-tauri-drag-region>
         <div className="prompts-container" data-tauri-drag-region>
-          {prompts.slice(0, 9).map((p, i) => (
+          {/* Render folders (PRO feature) */}
+          {hasProLicense && folders.map((folder) => (
+            <div key={folder.id} className="folder-container" data-tauri-drag-region="false">
+              <div
+                className={`folder-pill ${folder.isExpanded ? 'expanded' : 'collapsed'}`}
+                onClick={() => toggleFolder(folder.id)}
+                data-tauri-drag-region="false"
+              >
+                <div className="folder-badge">
+                  <div className="folder-icon">
+                    {folder.isExpanded ? '📂' : '📁'}
+                  </div>
+                </div>
+                <div className="folder-info">
+                  <div className="folder-name">{folder.name}</div>
+                  <div className="folder-count">{folder.prompts.length}</div>
+                </div>
+                <div className={`folder-gradient bg-gradient-to-r ${folder.color}`} />
+              </div>
+            </div>
+          ))}
+          
+          {/* Render all prompts with proper indexing */}
+          {getDisplayPrompts().map((p, i) => (
             <div
               key={p.id}
               ref={(el) => (pillRefs.current[i] = el)}
-              className={`prompt-pill ${injectedId === p.id ? "injected" : ""} ${
+              className={`prompt-pill ${p.folderId ? 'folder-prompt' : ''} ${injectedId === p.id ? "injected" : ""} ${
                 expandedIndex === i ? "expanded" : ""
-              }`}
+              } ${draggedPromptId === p.id ? 'dragging' : ''} ${dragOverPromptId === p.id ? 'drag-over' : ''}`}
+              draggable={hasProLicense}
+              onDragStart={(e) => handleDragStart(e, p.id)}
+              onDragOver={(e) => handleDragOver(e, p.id)}
+              onDragLeave={handleDragLeave}
+              onDrop={(e) => handleDrop(e, p.id)}
+              onDragEnd={handleDragEnd}
               onMouseEnter={() => handleMouseEnter(i)}
               onMouseLeave={handleMouseLeave}
               onClick={() => injectTextViaShortcut(p, i + 1)}
+              title="Click to enter wait-for-click mode - any click triggers text injection at cursor"
               onMouseDown={(e: React.MouseEvent) => {
                 if (e.button === 2) {
                   console.log(`Right-click (mouse down) detected on prompt ${i + 1}`);
@@ -447,7 +621,6 @@ function App() {
               }}
               data-tauri-drag-region="false"
             >
-              {/* Number + Edit stacked */}
               <div className="prompt-badge" data-tauri-drag-region="false">
                 <div className="prompt-number">{i + 1}</div>
                 <button
@@ -464,7 +637,6 @@ function App() {
                 </button>
               </div>
 
-              {/* Delete button in top right corner */}
               <button
                 className="delete-btn delete-btn-corner"
                 onClick={(e) => {
@@ -491,9 +663,7 @@ function App() {
                 </div>
               )}
 
-              <div
-                className={`prompt-gradient bg-gradient-to-r ${p.color}`}
-              />
+              <div className={`prompt-gradient bg-gradient-to-r ${p.color}`} />
             </div>
           ))}
           {prompts.length < 9 && !promptLimitInfo.isAtLimit && (

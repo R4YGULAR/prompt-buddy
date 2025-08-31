@@ -1,16 +1,21 @@
 import { useState, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
-import { Crown, Key, Copy } from "lucide-react";
+import { Crown, Key, Copy, Target } from "lucide-react";
 import { licenseManager, LicenseInfo } from "./services/license";
 import "./App.css";
 
 interface Settings {
   toggleShortcut: string;
+  targetMode: string;
+  targetAppName: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  toggleShortcut: "alt+shift+space"
+  toggleShortcut: "alt+shift+space",
+  targetMode: "auto",
+  targetAppName: ""
 };
 
 // Convert internal shortcut format to macOS display format
@@ -76,10 +81,27 @@ function SettingsPage() {
   const [license, setLicense] = useState<LicenseInfo>({ key: '', tier: 'free', isValid: false });
   const [licenseKey, setLicenseKey] = useState("");
   const [isActivatingLicense, setIsActivatingLicense] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  console.log("SettingsPage: Component mounted");
+  console.log("SettingsPage: Settings state:", settings);
 
   useEffect(() => {
-    loadSettings();
-    loadLicense();
+    console.log("SettingsPage: Initial useEffect triggered");
+    const initializeSettings = async () => {
+      try {
+        await loadSettings();
+        await loadLicense();
+      } catch (err) {
+        console.error("SettingsPage: Initialization error:", err);
+        setError(err instanceof Error ? err.message : 'Unknown error');
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    
+    initializeSettings();
   }, []);
 
   // Add keydown event listener for automatic shortcut detection
@@ -112,14 +134,30 @@ function SettingsPage() {
   }, [settings.toggleShortcut, isEditing]);
 
   const loadSettings = async () => {
+    console.log("SettingsPage: loadSettings called");
     try {
-      const store = await Store.load("settings.json");
-      const saved = await store.get<Settings>("settings");
-      if (saved) {
-        setSettings(saved);
-      }
+      console.log("SettingsPage: Attempting to invoke get_settings");
+      const settings = await invoke<Settings>("get_settings");
+      console.log("SettingsPage: Settings loaded from Tauri:", settings);
+      setSettings(settings);
     } catch (error) {
-      console.error("Failed to load settings:", error);
+      console.error("SettingsPage: Failed to load settings from Tauri:", error);
+      // Fallback to store method for backward compatibility
+      try {
+        console.log("SettingsPage: Trying fallback store method");
+        const store = await Store.load("settings.json");
+        const saved = await store.get<Settings>("settings");
+        if (saved) {
+          console.log("SettingsPage: Settings loaded from store:", saved);
+          setSettings(saved);
+        } else {
+          console.log("SettingsPage: No saved settings found, using defaults");
+        }
+      } catch (fallbackError) {
+        console.error("SettingsPage: Fallback settings load failed:", fallbackError);
+        console.log("SettingsPage: Using default settings");
+        // Keep using default settings
+      }
     }
   };
 
@@ -134,12 +172,19 @@ function SettingsPage() {
 
   const saveSettings = async (newSettings: Settings) => {
     try {
-      const store = await Store.load("settings.json");
-      await store.set("settings", newSettings);
-      await store.save();
+      await invoke("save_settings", { settings: newSettings });
       setSettings(newSettings);
     } catch (error) {
       console.error("Failed to save settings:", error);
+      // Fallback to store method for backward compatibility
+      try {
+        const store = await Store.load("settings.json");
+        await store.set("settings", newSettings);
+        await store.save();
+        setSettings(newSettings);
+      } catch (fallbackError) {
+        console.error("Fallback settings save failed:", fallbackError);
+      }
     }
   };
 
@@ -217,7 +262,20 @@ function SettingsPage() {
   return (
     <div className="settings-overlay" data-tauri-drag-region>
       <div className="settings-content">
-        <h3 className="settings-title">Settings</h3>
+        {isLoading ? (
+          <div>
+            <h3 className="settings-title">Loading Settings...</h3>
+            <p>Please wait while settings are loaded.</p>
+          </div>
+        ) : error ? (
+          <div>
+            <h3 className="settings-title">Error Loading Settings</h3>
+            <p style={{ color: 'red' }}>Error: {error}</p>
+            <button onClick={() => window.location.reload()}>Retry</button>
+          </div>
+        ) : (
+          <>
+            <h3 className="settings-title">Settings</h3>
 
         {/* License Section */}
         <div className="settings-section">
@@ -298,6 +356,66 @@ function SettingsPage() {
           )}
         </div>
 
+        {/* Target App Section */}
+        <div className="settings-section">
+          <h4 className="section-title">
+            <Target size={16} />
+            Text Injection Target
+          </h4>
+          
+          <div className="settings-item">
+            <span className="settings-label">Target mode:</span>
+            <div className="target-mode-options">
+              <label className="radio-option">
+                <input
+                  type="radio"
+                  name="targetMode"
+                  value="auto"
+                  checked={settings.targetMode === "auto"}
+                  onChange={(e) => saveSettings({ ...settings, targetMode: e.target.value })}
+                  data-tauri-drag-region="false"
+                />
+                <span>Auto (detect second frontmost app)</span>
+              </label>
+              
+              <label className="radio-option">
+                <input
+                  type="radio"
+                  name="targetMode"
+                  value="manual"
+                  checked={settings.targetMode === "manual"}
+                  onChange={(e) => saveSettings({ ...settings, targetMode: e.target.value })}
+                  data-tauri-drag-region="false"
+                />
+                <span>Manual (always use specific app)</span>
+              </label>
+            </div>
+          </div>
+          
+          {settings.targetMode === "manual" && (
+            <div className="settings-item">
+              <span className="settings-label">Target app name:</span>
+              <input
+                type="text"
+                value={settings.targetAppName}
+                onChange={(e) => saveSettings({ ...settings, targetAppName: e.target.value })}
+                placeholder="e.g. Qoder, VS Code, Cursor"
+                className="app-name-input"
+                data-tauri-drag-region="false"
+              />
+            </div>
+          )}
+          
+          <div className="settings-hints">
+            <p className="settings-hint">
+              💡 Auto mode: Automatically targets the second most recently used app
+            </p>
+            <p className="settings-hint">
+              🎯 Manual mode: Always targets the specified app (useful for apps that are hard to detect like Qoder)
+            </p>
+          </div>
+        </div>
+
         <h4 className="section-title">Keyboard Shortcuts</h4>
         
         <div className="settings-section">
@@ -358,6 +476,8 @@ function SettingsPage() {
         >
           Close
         </button>
+          </>
+        )}
       </div>
     </div>
   );

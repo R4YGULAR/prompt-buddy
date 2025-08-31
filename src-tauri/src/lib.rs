@@ -12,12 +12,16 @@ use tauri_plugin_store::StoreExt;
 #[derive(Serialize, Deserialize, Debug)]
 struct AppSettings {
     toggle_shortcut: String,
+    target_mode: String, // "auto" or "manual"
+    target_app_name: String, // specific app name when in manual mode
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             toggle_shortcut: "alt+shift+space".to_string(),
+            target_mode: "auto".to_string(),
+            target_app_name: "".to_string(),
         }
     }
 }
@@ -26,6 +30,139 @@ impl Default for AppSettings {
 // was shown. This lets us switch focus back to that application after the user
 // clicks a prompt pill so the text is inserted into the correct window.
 static LAST_APP_NAME: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+// Store the name of the application that was active before the last one
+// This helps in case the last app is Prompt Buddy itself or DaVinci Resolve Electron window
+static PREVIOUS_APP_NAME: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+// The name of our own application (used to detect if we're trying to inject into ourselves)
+static APP_NAME: &str = "Prompt Buddy";
+
+// Known problematic app names that might cause issues - these should be exact app names
+static PROBLEMATIC_APPS: [&str; 1] = ["Electron"];
+
+// Helper function to resolve Electron apps to their actual names
+#[cfg(target_os = "macos")]
+fn get_electron_app_name() -> Option<String> {
+    // Get the process ID of the frontmost Electron app
+    let pid_output = Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to get unix id of first application process whose name is \"Electron\"")
+        .output()
+        .ok()?;
+    
+    if !pid_output.status.success() {
+        return None;
+    }
+    
+    let pid = String::from_utf8_lossy(&pid_output.stdout).trim().to_string();
+    if pid.is_empty() {
+        return None;
+    }
+    
+    println!("🔍 Electron process PID: {}", pid);
+    
+    // Get the bundle path for that PID
+    let bundle_output = Command::new("osascript")
+        .arg("-e")
+        .arg(format!("tell application \"System Events\" to get application file of application process id {}", pid))
+        .output()
+        .ok()?;
+    
+    if !bundle_output.status.success() {
+        return None;
+    }
+    
+    let bundle_path = String::from_utf8_lossy(&bundle_output.stdout).trim().to_string();
+    println!("🔍 Bundle path: {}", bundle_path);
+    
+    // Special handling for known apps
+    if bundle_path.contains("DaVinci Resolve") {
+        println!("🔍 Detected DaVinci Resolve from bundle path");
+        return Some("DaVinci Resolve".to_string());
+    }
+    
+    if bundle_path.contains("Qoder") || bundle_path.contains("qoder") {
+        println!("🔍 Detected Qoder from bundle path");
+        return Some("Qoder".to_string());
+    }
+    
+    // Extract the application name from the bundle path
+    if !bundle_path.is_empty() {
+        let parts: Vec<&str> = bundle_path.split("/").collect();
+        if let Some(app_file) = parts.last() {
+            let app_name = app_file.replace(".app", "");
+            println!("🔍 Resolved Electron to app: {}", app_name);
+            return Some(app_name);
+        }
+    }
+    
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_electron_app_name() -> Option<String> {
+    None
+}
+
+
+fn is_valid_app_name(name: &str) -> bool {
+    // Check for empty or very short names
+    if name.len() < 2 {
+        return false;
+    }
+    
+    // Check for our own app name (including variations)
+    if name.contains(APP_NAME) || name == "prompt-buddy" || name.contains("Prompt") {
+        return false;
+    }
+    
+    // Additional validation rules can be added here
+    true
+}
+
+// A utility function to check if an app name is problematic
+fn is_problematic_app(app_name: &str) -> bool {
+    println!("🔍 Checking if app is problematic: {}", app_name);
+    
+    // Check for our own app (including variations)
+    if app_name.contains(APP_NAME) || app_name == "prompt-buddy" || app_name.contains("Prompt") {
+        println!("⚠️ App is our own app");
+        return true;
+    }
+    
+    // Check for known problematic apps by exact match to avoid false positives
+    for name in PROBLEMATIC_APPS.iter() {
+        if app_name == *name {  // Exact match only
+            println!("⚠️ App exactly matches known problematic app: {}", name);
+            return true;
+        }
+    }
+    
+    // Filter out macOS system daemons and background processes
+    let system_processes = [
+        "universalaccessd", "Dock", "Finder", "SystemUIServer", "ControlCenter",
+        "WindowServer", "loginwindow", "kernel_task", "launchd", "syslogd",
+        "UserEventAgent", "cfprefsd", "distnoted", "NotificationCenter",
+        "Spotlight", "mds", "mdworker", "CoreServicesUIAgent", "AirPlayUIAgent"
+    ];
+    
+    for sys_proc in system_processes.iter() {
+        if app_name == *sys_proc {
+            println!("⚠️ App is a system process: {}", app_name);
+            return true;
+        }
+    }
+    
+    // Filter out apps ending with 'd' (likely daemons) or containing 'Agent'
+    if (app_name.ends_with("d") && app_name.len() > 3) || app_name.contains("Agent") {
+        println!("⚠️ App appears to be a daemon or agent: {}", app_name);
+        return true;
+    }
+    
+    // Not problematic
+    false
+}
 
 fn load_settings(app: &AppHandle) -> AppSettings {
     match app.store("settings.json") {
@@ -54,25 +191,102 @@ fn load_settings(app: &AppHandle) -> AppSettings {
 
 #[cfg(target_os = "macos")]
 fn get_frontmost_app() -> Option<String> {
-    let output = Command::new("osascript")
+    // First get the process name to see if we need special handling
+    let name_output = Command::new("osascript")
         .arg("-e")
         .arg("tell application \"System Events\" to get name of application process 1 whose frontmost is true")
         .output()
         .ok()?;
-    if output.status.success() {
-        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !name.is_empty() {
-            return Some(name);
-        }
+    
+    if !name_output.status.success() {
+        return None;
     }
+    
+    let process_name = String::from_utf8_lossy(&name_output.stdout).trim().to_string();
+    println!("🔍 Frontmost process name: {}", process_name);
+    
+    // If it's Electron, we need to resolve to the actual parent application
+    if process_name == "Electron" {
+        println!("🔍 Detected Electron process, attempting to resolve parent app...");
+        
+        // Get the process ID of the frontmost app
+        let pid_output = Command::new("osascript")
+            .arg("-e")
+            .arg("tell application \"System Events\" to get unix id of application process 1 whose frontmost is true")
+            .output()
+            .ok()?;
+        
+        if pid_output.status.success() {
+            let pid = String::from_utf8_lossy(&pid_output.stdout).trim().to_string();
+            if !pid.is_empty() {
+                println!("🔍 Electron process PID: {}", pid);
+                
+                // Get the bundle path for that PID
+                let bundle_output = Command::new("osascript")
+                    .arg("-e")
+                    .arg(format!("tell application \"System Events\" to get application file of application process id {}", pid))
+                    .output()
+                    .ok()?;
+                
+                if bundle_output.status.success() {
+                    let bundle_path = String::from_utf8_lossy(&bundle_output.stdout).trim().to_string();
+                    println!("🔍 Bundle path: {}", bundle_path);
+                    
+                    // Special handling for known Electron apps
+                    if bundle_path.contains("DaVinci Resolve") {
+                        println!("🔍 Detected DaVinci Resolve from bundle path");
+                        return Some("DaVinci Resolve".to_string());
+                    }
+                    
+                    // Special handling for Qoder IDE
+                    if bundle_path.contains("Qoder") || bundle_path.contains("qoder") {
+                        println!("🔍 Detected Qoder IDE from bundle path");
+                        return Some("Qoder".to_string());
+                    }
+                    
+                    // Extract the application name from the bundle path
+                    if !bundle_path.is_empty() {
+                        let parts: Vec<&str> = bundle_path.split("/").collect();
+                        if let Some(app_file) = parts.last() {
+                            let app_name = app_file.replace(".app", "");
+                            println!("🔍 Resolved Electron to app: {}", app_name);
+                            return Some(app_name);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If we can't resolve the Electron app, return None to avoid activating random Electron processes
+        println!("⚠️ Could not resolve Electron process to parent app, returning None");
+        return None;
+    }
+    
+    // For non-Electron apps, validate the name and return it
+    if !process_name.is_empty() && is_valid_app_name(&process_name) {
+        println!("🔍 Using process name: {}", process_name);
+        return Some(process_name);
+    }
+    
+    println!("⚠️ Process name is empty or invalid");
     None
 }
 
 #[cfg(target_os = "macos")]
 fn activate_app(app_name: &str) -> bool {
+    // Check if this is a problematic app before activating
+    if is_problematic_app(app_name) {
+        println!("⚠️ Refusing to activate potentially problematic app: {}", app_name);
+        return false;
+    }
+    
+    // This is the safer approach - activate by name only, not by path
+    let cmd = format!("tell application \"{}\" to activate", app_name);
+    println!("🚀 Activating app with command: {}", cmd);
+    
     Command::new("osascript")
         .arg("-e")
-        .arg(format!("tell application \"{}\" to activate", app_name))
+        .arg(cmd)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -91,7 +305,46 @@ struct PromptPayload {
   index: usize,
 }
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+#[tauri::command]
+async fn get_settings(app: tauri::AppHandle) -> Result<AppSettings, String> {
+    Ok(load_settings(&app))
+}
+
+#[tauri::command]
+async fn save_settings(app: tauri::AppHandle, settings: AppSettings) -> Result<(), String> {
+    println!("💾 Saving settings: {:?}", settings);
+    
+    match app.store("settings.json") {
+        Ok(store) => {
+            match serde_json::to_value(&settings) {
+                Ok(settings_value) => {
+                    store.set("settings", settings_value);
+                    
+                    if let Err(e) = store.save() {
+                        let error_msg = format!("Failed to save settings: {}", e);
+                        println!("❌ {}", error_msg);
+                        return Err(error_msg);
+                    }
+                    
+                    println!("✅ Settings saved successfully");
+                    Ok(())
+                },
+                Err(e) => {
+                    let error_msg = format!("Failed to serialize settings: {}", e);
+                    println!("❌ {}", error_msg);
+                    Err(error_msg)
+                }
+            }
+        },
+        Err(e) => {
+            let error_msg = format!("Failed to load settings store: {}", e);
+            println!("❌ {}", error_msg);
+            Err(error_msg)
+        }
+    }
+}
+
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
@@ -158,53 +411,410 @@ async fn toggle_window_visibility(app: tauri::AppHandle) -> Result<String, Strin
 }
 
 #[tauri::command]
-async fn inject_text(text: String) -> Result<String, String> {
-    println!("🚀 Starting text injection...");
+async fn inject_text_at_cursor(_app: tauri::AppHandle, text: String) -> Result<String, String> {
+    println!("🚀 Starting click-to-inject mode...");
     println!("📝 Text to inject: '{}'", text);
     println!("📏 Text length: {} characters", text.len());
 
-    // Attempt to reactivate the previously focused application (macOS only).
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(app_name) = LAST_APP_NAME.lock().unwrap().clone() {
-            println!("🔄 Reactivating previously active app: {}", app_name);
-            if !activate_app(&app_name) {
-                println!("⚠️  Failed to reactivate {}", app_name);
-            }
-        } else {
-            println!("ℹ️  No previously active app recorded – skipping re-activation");
-        }
-    }
-    
     if text.is_empty() {
         let error_msg = "❌ Cannot inject empty text";
         println!("{}", error_msg);
         return Err(error_msg.to_string());
     }
-    
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
-        let error_msg = format!("❌ Failed to initialize input system: {}", e);
-        println!("{}", error_msg);
-        error_msg
-    })?;
-    
-    println!("⏱️  Waiting 300ms after activating previous window...");
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    
-    println!("⌨️  Attempting to type text...");
-    
-    // Try to type the text
-    match enigo.text(&text) {
-        Ok(_) => {
-            println!("✅ Text injection completed successfully");
-            Ok("Text injected successfully".to_string())
-        },
-        Err(e) => {
-            let error_msg = format!("❌ Text injection failed: {}. This usually means no text field is currently focused or the app needs accessibility permissions.", e);
-            println!("{}", error_msg);
-            Err("No active text field found or missing accessibility permissions. Please:\n1. Click on a text field to focus it\n2. Check System Preferences > Security & Privacy > Privacy > Accessibility".to_string())
+
+    // Don't hide the window - let it stay visible for better UX
+    println!("📝 Keeping window visible during injection process...");
+
+    #[cfg(target_os = "macos")]
+    {
+        println!("🖱️  Waiting for user to click where they want text injected...");
+        
+        // Show notification and wait for actual mouse click
+        let script = r#"
+            tell application "System Events"
+                display notification "Click anywhere to inject text" with title "Prompt Buddy"
+                
+                -- Very simple approach: wait for any global event
+                set eventDetected to false
+                set counter to 0
+                
+                repeat until eventDetected or counter > 300  -- 30 second timeout (0.1s intervals)
+                    delay 0.1
+                    set counter to counter + 1
+                    
+                    -- Try to detect any system activity that suggests user interaction
+                    try
+                        -- Check if anything changed in the system that suggests a click
+                        set currentApp to (name of first application process whose frontmost is true)
+                        if currentApp is not "" then
+                            -- Wait a moment and check again to see if focus changed
+                            delay 0.2
+                            set newApp to (name of first application process whose frontmost is true)
+                            if newApp is not equal to currentApp or counter > 20 then  -- Either focus changed or 2+ seconds passed
+                                set eventDetected to true
+                            end if
+                        end if
+                    on error
+                        -- If there's any error, just proceed after a short wait
+                        if counter > 20 then
+                            set eventDetected to true
+                        end if
+                    end try
+                end repeat
+                
+                if eventDetected then
+                    return "clicked"
+                else
+                    return "timeout"
+                end if
+            end tell
+        "#;
+
+        println!("📏 Executing click detection script...");
+        
+        // Execute the click detection script
+        let click_result = Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .output();
+
+        match click_result {
+            Ok(output) => {
+                let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                println!("📏 Click detection result: '{}'", result);
+                
+                if result == "timeout" {
+                    println!("⏰ Click timeout - no click detected within 30 seconds");
+                    return Err("⏰ Click timeout - no click detected within 30 seconds".to_string());
+                }
+                
+                println!("✅ Click detected! Injecting text at current cursor position...");
+                
+                // Small delay to ensure the click is fully processed
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                
+                // Now inject the text at wherever the cursor currently is (not at click location)
+                match Enigo::new(&Settings::default()) {
+                    Ok(mut enigo) => {
+                        match enigo.text(&text) {
+                            Ok(_) => {
+                                println!("✅ Text injected successfully at cursor position");
+                                Ok(format!("Text injected: {}", text))
+                            }
+                            Err(e) => {
+                                let error_msg = format!("❌ Failed to inject text: {}", e);
+                                println!("{}", error_msg);
+                                Err(error_msg)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let error_msg = format!("❌ Failed to create input simulator: {}", e);
+                        println!("{}", error_msg);
+                        Err(error_msg)
+                    }
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("❌ Failed to execute click detection: {}", e);
+                println!("{}", error_msg);
+                Err(error_msg)
+            }
         }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // For non-macOS platforms, we'll implement a simpler approach
+        println!("🔄 Click-to-inject not yet implemented for this platform");
+        
+        // Fallback: inject text immediately at current cursor position
+        match Enigo::new(&Settings::default()) {
+            Ok(mut enigo) => {
+                match enigo.text(&text) {
+                    Ok(_) => {
+                        println!("✅ Text injected at current cursor position");
+                        Ok(format!("Text injected: {}", text))
+                    }
+                    Err(e) => {
+                        let error_msg = format!("❌ Failed to inject text: {}", e);
+                        println!("{}", error_msg);
+                        Err(error_msg)
+                    }
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("❌ Failed to create input simulator: {}", e);
+                println!("{}", error_msg);
+                Err(error_msg)
+            }
+        }
+    }
+}
+
+
+// Function to detect target app automatically
+#[cfg(target_os = "macos")]
+fn detect_target_app() -> Option<String> {
+    // First, let's get comprehensive app information to debug why Qoder isn't appearing
+    println!("🔍 === DEBUGGING APP DETECTION ===");
+    
+    // Try multiple approaches to find all running apps
+    let all_processes_output = Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to get name of every application process")
+        .output();
+        
+    if let Ok(output) = all_processes_output {
+        if output.status.success() {
+            let all_processes = String::from_utf8_lossy(&output.stdout);
+            println!("🔍 ALL running processes: {}", all_processes.trim());
+        }
+    }
+    
+    // Try using `ps` command to get all processes (more comprehensive)
+    let ps_output = Command::new("ps")
+        .arg("-axo")
+        .arg("comm")
+        .output();
+        
+    if let Ok(output) = ps_output {
+        if output.status.success() {
+            let ps_processes = String::from_utf8_lossy(&output.stdout);
+            let ps_lines: Vec<&str> = ps_processes.lines().collect();
+            let qoder_processes: Vec<&str> = ps_lines.iter()
+                .filter(|line| line.to_lowercase().contains("qoder"))
+                .cloned()
+                .collect();
+                
+            if !qoder_processes.is_empty() {
+                println!("🔍 FOUND Qoder processes via ps: {:?}", qoder_processes);
+            } else {
+                println!("🔍 NO Qoder processes found via ps");
+            }
+        }
+    }
+    
+    // Try using `pgrep` to find Qoder specifically
+    let pgrep_output = Command::new("pgrep")
+        .arg("-f")
+        .arg("-i")
+        .arg("qoder")
+        .output();
+        
+    if let Ok(output) = pgrep_output {
+        if output.status.success() {
+            let pids = String::from_utf8_lossy(&output.stdout);
+            if !pids.trim().is_empty() {
+                println!("🔍 FOUND Qoder PIDs via pgrep: {}", pids.trim());
+                
+                // Try to get more info about these processes
+                for pid in pids.trim().lines() {
+                    let ps_info_output = Command::new("ps")
+                        .arg("-p")
+                        .arg(pid)
+                        .arg("-o")
+                        .arg("comm,args")
+                        .output();
+                        
+                    if let Ok(info_output) = ps_info_output {
+                        if info_output.status.success() {
+                            let info = String::from_utf8_lossy(&info_output.stdout);
+                            println!("🔍 Qoder process {} info: {}", pid, info.trim());
+                        }
+                    }
+                }
+            } else {
+                println!("🔍 NO Qoder PIDs found via pgrep");
+            }
+        }
+    }
+    
+    // Try alternative AppleScript queries for hidden/background apps
+    let all_apps_output = Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to get name of every application process whose background only is false")
+        .output();
+        
+    if let Ok(output) = all_apps_output {
+        if output.status.success() {
+            let all_apps = String::from_utf8_lossy(&output.stdout);
+            println!("🔍 ALL non-background apps: {}", all_apps.trim());
+        }
+    }
+    
+    // Get visible processes
+    let visible_output = Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to get name of every application process whose visible is true")
+        .output();
+        
+    if let Ok(output) = visible_output {
+        if output.status.success() {
+            let visible_processes = String::from_utf8_lossy(&output.stdout);
+            println!("🔍 VISIBLE processes: {}", visible_processes.trim());
+        }
+    }
+    
+    // Get frontmost processes in order
+    let frontmost_list_output = Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to get name of every application process whose frontmost is true")
+        .output();
+        
+    if let Ok(output) = frontmost_list_output {
+        if output.status.success() {
+            let frontmost_list = String::from_utf8_lossy(&output.stdout);
+            println!("🔍 FRONTMOST processes (in order): {}", frontmost_list.trim());
+        }
+    }
+    
+    println!("🔍 === END DEBUGGING ===");
+    
+    // Now try our normal detection logic
+    let frontmost_output = Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to get name of first application process whose frontmost is true")
+        .output();
+        
+    let mut target_app: Option<String> = None;
+    
+    // Check the frontmost app first
+    if let Ok(output) = frontmost_output {
+        if output.status.success() {
+            let frontmost = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            println!("🎯 Frontmost app: {}", frontmost);
+            
+            // If frontmost is not our app and is suitable, use it
+            if frontmost != "Prompt Buddy" && frontmost != "prompt-buddy" && !is_problematic_app(&frontmost) && is_valid_app_name(&frontmost) {
+                target_app = Some(frontmost);
+                println!("✅ Using frontmost app as target");
+            }
+        }
+    }
+    
+    // If frontmost app is not suitable, try to get all frontmost apps and pick the second one
+    if target_app.is_none() {
+        println!("🔍 Frontmost not suitable, trying to get second frontmost...");
+        
+        // Get all frontmost processes (should be ordered by most recent)
+        let all_frontmost_output = Command::new("osascript")
+            .arg("-e")
+            .arg("tell application \"System Events\" to get name of every application process whose frontmost is true")
+            .output();
+            
+        if let Ok(output) = all_frontmost_output {
+            if output.status.success() {
+                let processes_str = String::from_utf8_lossy(&output.stdout);
+                let processes: Vec<&str> = processes_str.split(", ").map(|s| s.trim()).collect();
+                
+                println!("🎯 All frontmost apps in order: {:?}", processes);
+                
+                // Skip the first one (our app) and find the first suitable one
+                for (i, process) in processes.iter().enumerate() {
+                    println!("🔍 Checking process #{}: {}", i, process);
+                    
+                    if i > 0 && // Skip the first one
+                       *process != "Prompt Buddy" && 
+                       *process != "prompt-buddy" && 
+                       !is_problematic_app(process) && 
+                       is_valid_app_name(process) {
+                        println!("✅ Found suitable target app from frontmost list: {}", process);
+                        target_app = Some(process.to_string());
+                        break;
+                    } else {
+                        println!("🚫 Skipping unsuitable app: {}", process);
+                    }
+                }
+            }
+        }
+    }
+    
+    // If we still don't have a target, check all visible apps
+    if target_app.is_none() {
+        println!("🔍 No suitable frontmost apps found, checking all visible apps...");
+        
+        // Get apps that are visible
+        let space_apps_output = Command::new("osascript")
+            .arg("-e")
+            .arg("tell application \"System Events\" to get name of every application process whose visible is true")
+            .output();
+        
+        if let Ok(output) = space_apps_output {
+            if output.status.success() {
+                let processes_str = String::from_utf8_lossy(&output.stdout);
+                let processes: Vec<&str> = processes_str.split(", ").map(|s| s.trim()).collect();
+                
+                println!("🎯 All visible apps: {:?}", processes);
+                
+                // Look specifically for Qoder first
+                for process in &processes {
+                    if process.contains("Qoder") || process.contains("qoder") {
+                        println!("🎯 Found Qoder in visible apps: {}", process);
+                        target_app = Some(process.to_string());
+                        break;
+                    }
+                }
+                
+                // If no Qoder found, reverse the order to prioritize newer apps (like Electron-based ones)
+                if target_app.is_none() {
+                    let mut reversed_processes = processes.clone();
+                    reversed_processes.reverse();
+                    println!("🔄 Reversed process order (newer apps first): {:?}", reversed_processes);
+                    
+                    for process in reversed_processes {
+                        if process != "Prompt Buddy" && process != "prompt-buddy" && !is_problematic_app(process) && is_valid_app_name(process) {
+                            println!("🎯 Found suitable target app from reversed visible apps: {}", process);
+                            target_app = Some(process.to_string());
+                            break;
+                        } else {
+                            println!("🚫 Skipping unsuitable app: {}", process);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Handle Electron resolution
+    if let Some(app_name) = &target_app {
+        if app_name == "Electron" {
+            println!("🎯 Detected Electron - attempting to resolve to actual app...");
+            
+            // Try to get the actual app name from the Electron process
+            let electron_app = get_electron_app_name();
+            if let Some(resolved_name) = electron_app {
+                println!("🎯 Resolved Electron to: {}", resolved_name);
+                return Some(resolved_name);
+            } else {
+                println!("⚠️ Could not resolve Electron app, trying direct Qoder activation...");
+                
+                // Try direct Qoder activation as fallback
+                let qoder_variants = ["Qoder", "Qoder IDE", "qoder", "Qoder.app"];
+                for variant in qoder_variants.iter() {
+                    let test_cmd = format!("tell application \"{}\" to get name", variant);
+                    let test_result = Command::new("osascript")
+                        .arg("-e")
+                        .arg(test_cmd)
+                        .output();
+                        
+                    if let Ok(output) = test_result {
+                        if output.status.success() {
+                            println!("✅ Found working Qoder variant: {}", variant);
+                            return Some(variant.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    target_app
+}
+
+#[cfg(not(target_os = "macos"))]
+fn detect_target_app() -> Option<String> {
+    None
 }
 
 #[tauri::command]
@@ -277,8 +887,35 @@ async fn capture_frontmost_app() -> Result<(), String> {
 async fn activate_last_app() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        // Sleep briefly to let any previously launched apps settle
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        
         if let Some(app_name) = LAST_APP_NAME.lock().unwrap().clone() {
             println!("🔄 Tauri cmd: activating last app = {}", app_name);
+            
+            // Check if the last app is problematic
+            if is_problematic_app(&app_name) {
+                println!("⚠️ Detected problematic app as last app: {}", app_name);
+                
+                // Try to use the app before the current one
+                if let Some(previous_app) = PREVIOUS_APP_NAME.lock().unwrap().clone() {
+                    println!("🔄 Falling back to previous app: {}", previous_app);
+                    
+                    // Check if previous app is also problematic
+                    if !is_problematic_app(&previous_app) && activate_app(&previous_app) {
+                        return Ok(());
+                    } else {
+                        println!("⚠️ Failed to activate previous app or it's problematic: {}", previous_app);
+                        // Don't fall through to try the problematic app
+                        return Ok(());
+                    }
+                } else {
+                    println!("⚠️ No previous app available, and current app is problematic. Will not activate.");
+                    return Ok(());
+                }
+            }
+            
+            // Try to activate the last app
             if activate_app(&app_name) {
                 return Ok(());
             } else {
@@ -304,7 +941,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![greet, inject_text, check_accessibility_permissions, toggle_window_visibility, show_popup, hide_popup, capture_frontmost_app, activate_last_app])
+        .invoke_handler(tauri::generate_handler![greet, inject_text_at_cursor, check_accessibility_permissions, toggle_window_visibility, show_popup, hide_popup, capture_frontmost_app, activate_last_app, get_settings, save_settings])
         .setup(|app| {
             println!("🔧 Setting up global shortcuts with handlers...");
             
@@ -445,7 +1082,19 @@ fn remember_current_app() {
     {
         if let Some(name) = get_frontmost_app() {
             println!("💾 Remembering current frontmost app: {}", name);
-            *LAST_APP_NAME.lock().unwrap() = Some(name);
+            
+            // Get a lock on both mutexes
+            let mut last_app_lock = LAST_APP_NAME.lock().unwrap();
+            let mut prev_app_lock = PREVIOUS_APP_NAME.lock().unwrap();
+            
+            // If there is a current last app, store it as the previous app
+            if let Some(ref last_app) = *last_app_lock {
+                println!("💾 Updating previous app to: {}", last_app);
+                *prev_app_lock = Some(last_app.clone());
+            }
+            
+            // Set the new last app
+            *last_app_lock = Some(name);
         }
     }
 }

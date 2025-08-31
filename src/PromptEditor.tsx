@@ -12,6 +12,15 @@ interface Prompt {
   title: string;
   content: string;
   color: string;
+  folderId?: string;
+}
+
+interface Folder {
+  id: string;
+  name: string;
+  color: string;
+  isExpanded: boolean;
+  prompts: Prompt[];
 }
 
 const DEFAULT_PROMPTS: Prompt[] = [
@@ -76,6 +85,10 @@ function PromptEditor() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationPrompt, setGenerationPrompt] = useState("");
   const [hasProLicense, setHasProLicense] = useState(false);
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [showCreateFolder, setShowCreateFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
 
   useEffect(() => {
     console.log('PromptEditor useEffect, index:', index);
@@ -91,18 +104,24 @@ function PromptEditor() {
         const proLicense = await licenseManager.hasProLicense();
         setHasProLicense(proLicense);
         
+        // Load folders
+        let savedFolders = await store.get<Folder[]>("folders") || [];
+        setFolders(savedFolders);
+        
         if (saved.length === 0) saved = DEFAULT_PROMPTS;
         if (index >= 0 && index < saved.length) {
           const p = saved[index];
           setPrompt(p);
           setTitle(p.title);
           setContent(p.content);
+          setSelectedFolderId(p.folderId || null);
         } else if (index === -1) {
           const defaultColor = 'from-blue-500 to-cyan-500';
           const tempPrompt = {id: '', title: '', content: '', color: defaultColor};
           setPrompt(tempPrompt);
           setTitle('');
           setContent('');
+          setSelectedFolderId(null);
         }
         setLoaded(true);
         console.log('Set loaded to true');
@@ -153,7 +172,7 @@ function PromptEditor() {
       
       if (index >= 0 && index < saved.length) {
         console.log('✏️ Editing existing prompt at index:', index);
-        saved[index] = { ...prompt, title: title.trim(), content: content.trim() };
+        saved[index] = { ...prompt, title: title.trim(), content: content.trim(), folderId: selectedFolderId || undefined };
       } else if (index === -1) {
         console.log('➕ Adding new prompt');
         
@@ -164,15 +183,35 @@ function PromptEditor() {
           return;
         }
         
-        const newId = (saved.length + 1).toString();
+        const newId = Date.now().toString();
         const newPrompt = { 
           id: newId, 
           title: title.trim(), 
           content: content.trim(), 
-          color: prompt.color 
+          color: prompt.color,
+          folderId: selectedFolderId || undefined
         };
         console.log('🆕 New prompt object:', newPrompt);
         saved.push(newPrompt);
+      }
+      
+      // Update folder contents if needed
+      if (hasProLicense && selectedFolderId) {
+        let savedFolders = await store.get<Folder[]>("folders") || [];
+        const targetFolder = savedFolders.find(f => f.id === selectedFolderId);
+        if (targetFolder) {
+          const promptId = index >= 0 ? prompt?.id : Date.now().toString();
+          // Remove prompt from all folders first
+          savedFolders.forEach(folder => {
+            folder.prompts = folder.prompts.filter(p => p.id !== promptId);
+          });
+          // Add to target folder
+          const promptToAdd = saved.find(p => p.id === promptId);
+          if (promptToAdd) {
+            targetFolder.prompts.push(promptToAdd);
+          }
+          await store.set("folders", savedFolders);
+        }
       }
       
       console.log('💾 Final prompts array to save:', saved);
@@ -288,6 +327,33 @@ function PromptEditor() {
     }
   };
 
+  const createFolder = async () => {
+    if (!hasProLicense || !newFolderName.trim()) return;
+    
+    try {
+      const store = await Store.load('prompts.json');
+      let savedFolders = await store.get<Folder[]>("folders") || [];
+      
+      const newFolder: Folder = {
+        id: `folder_${Date.now()}`,
+        name: newFolderName.trim(),
+        color: "from-gray-500 to-gray-600",
+        isExpanded: true,
+        prompts: []
+      };
+      
+      savedFolders.push(newFolder);
+      await store.set("folders", savedFolders);
+      await store.save();
+      setFolders(savedFolders);
+      setNewFolderName('');
+      setShowCreateFolder(false);
+      setSelectedFolderId(newFolder.id);
+    } catch (error) {
+      console.error('Error creating folder:', error);
+    }
+  };
+
   if (!loaded) {
     return <div className="prompt-editor">Loading...</div>;
   }
@@ -308,6 +374,72 @@ function PromptEditor() {
           className="editor-input"
         />
       </label>
+
+      {/* Folder Selection (PRO feature) */}
+      {hasProLicense && (
+        <div className="folder-selection-section">
+          <label>
+            Folder (Optional):
+            <div className="folder-input-group">
+              <select
+                value={selectedFolderId || ''}
+                onChange={(e) => setSelectedFolderId(e.target.value || null)}
+                className="folder-select"
+              >
+                <option value="">No folder</option>
+                {folders.map(folder => (
+                  <option key={folder.id} value={folder.id}>
+                    📁 {folder.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => setShowCreateFolder(!showCreateFolder)}
+                className="create-folder-btn"
+              >
+                +
+              </button>
+            </div>
+          </label>
+          
+          {showCreateFolder && (
+            <div className="create-folder-input">
+              <input
+                type="text"
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                placeholder="New folder name"
+                className="folder-name-input"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    createFolder();
+                  }
+                }}
+              />
+              <button
+                type="button"
+                onClick={createFolder}
+                disabled={!newFolderName.trim()}
+                className="confirm-folder-btn"
+              >
+                Create
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreateFolder(false);
+                  setNewFolderName('');
+                }}
+                className="cancel-folder-btn"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* AI Generation Section */}
       {!content && (

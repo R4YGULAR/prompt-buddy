@@ -1,4 +1,4 @@
-import { Store } from "@tauri-apps/plugin-store";
+import { Store } from '@tauri-apps/plugin-store';
 
 export const FREE_TIER_LIMITS = {
   MAX_CUSTOM_PROMPTS: 5, // Free users can add 5 custom prompts (plus 6 defaults)
@@ -93,8 +93,22 @@ export class LicenseManager {
   }
 
   async hasProLicense(): Promise<boolean> {
+    // Dev mode: always return true in development
+    if (this.isDevMode()) {
+      return true;
+    }
+    
     const license = await this.getLicenseInfo();
     return license.isValid && license.tier === 'pro';
+  }
+
+  private isDevMode(): boolean {
+    // Check if running in development mode
+    return import.meta.env?.DEV === true || 
+           import.meta.env?.MODE === 'development' ||
+           window.location.hostname === 'localhost' ||
+           window.location.hostname === '127.0.0.1' ||
+           window.location.protocol === 'tauri:';
   }
 
   async removeLicense(): Promise<void> {
@@ -104,6 +118,11 @@ export class LicenseManager {
   }
 
   async canAddPrompt(currentPromptCount: number): Promise<{ canAdd: boolean; reason?: string }> {
+    // Dev mode: always allow adding prompts
+    if (this.isDevMode()) {
+      return { canAdd: true };
+    }
+    
     const license = await this.getLicenseInfo();
     
     if (license.tier === 'pro') {
@@ -127,6 +146,16 @@ export class LicenseManager {
     remainingPrompts: number;
     totalAllowed: number;
   }> {
+    // Dev mode: unlimited prompts
+    if (this.isDevMode()) {
+      return {
+        isAtLimit: false,
+        isNearLimit: false,
+        remainingPrompts: -1, // Unlimited
+        totalAllowed: -1      // Unlimited
+      };
+    }
+    
     const license = await this.getLicenseInfo();
     
     if (license.tier === 'pro') {
